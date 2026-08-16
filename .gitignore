@@ -1,0 +1,21 @@
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 本地构建中间产物
+build/
+dist/
+release/
+
+# 运行时缓存（程序会自动重新生成）
+data/*.json
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

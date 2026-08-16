@@ -1,0 +1,3 @@
+requests>=2.31,<3
+pyinstaller>=6.0,<7
+tzdata>=2025.2
