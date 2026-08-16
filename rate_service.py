@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,7 @@ CRYPTO_API = (
 )
 BINANCE_API = "https://data-api.binance.vision/api/v3"
 FRANKFURTER_API = "https://api.frankfurter.dev/v2/rates"
+MANAGED_CACHE_PATTERNS = ("rates_cache.json", "rates_cache.tmp", "chart_*.json", "fiat_chart_*.json")
 BINANCE_CRYPTOS = {
     "BTC": "Bitcoin", "ETH": "Ethereum", "BNB": "BNB", "XRP": "XRP", "USDC": "USDC",
     "SOL": "Solana", "TRX": "TRON", "DOGE": "Dogecoin", "ADA": "Cardano", "BCH": "Bitcoin Cash",
@@ -195,7 +197,7 @@ def relative_rate_change(base_change: float | None, target_change: float | None)
         return None
     base_factor = 1 + base_change / 100
     target_factor = 1 + target_change / 100
-    if base_factor <= 0:
+    if base_factor <= 0 or target_factor <= 0:
         return None
     return (target_factor / base_factor - 1) * 100
 
@@ -227,7 +229,7 @@ class RateService:
         self.data_dir = data_dir or portable_dir() / "data"
         self.cache_path = self.data_dir / "rates_cache.json"
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Yaoheng/3.12 (Windows portable)"})
+        self.session.headers.update({"User-Agent": "Yaoheng/3.13 (Windows portable)"})
         self.cache_limit_mb = 0
         self.snapshot = self.load_cache()
 
@@ -244,7 +246,49 @@ class RateService:
     def load_cache(self) -> RateSnapshot:
         try:
             data = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            return RateSnapshot(**data)
+            if not isinstance(data, dict) or not isinstance(data.get("rates"), dict):
+                raise ValueError("缓存格式无效")
+            rates: dict[str, float] = {}
+            for raw_code, raw_value in data["rates"].items():
+                code = str(raw_code).upper()
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if re.fullmatch(r"[A-Z0-9_]{1,24}", code) and math.isfinite(value) and value > 0:
+                    rates[code] = value
+            if not rates:
+                raise ValueError("缓存中没有有效汇率")
+            raw_names = data.get("names") if isinstance(data.get("names"), dict) else {}
+            raw_kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
+            raw_changes = data.get("changes") if isinstance(data.get("changes"), dict) else {}
+            names = {code: str(raw_names.get(code, code)) for code in rates}
+            kinds = {code: str(raw_kinds.get(code, "")) for code in rates if raw_kinds.get(code) in {"fiat", "crypto"}}
+            changes: dict[str, float | None] = {}
+            for code in rates:
+                raw_change = raw_changes.get(code)
+                if raw_change is None:
+                    changes[code] = None
+                    continue
+                try:
+                    change = float(raw_change)
+                except (TypeError, ValueError):
+                    changes[code] = None
+                else:
+                    changes[code] = change if math.isfinite(change) else None
+            raw_coin_ids = data.get("coin_ids") if isinstance(data.get("coin_ids"), dict) else {}
+            coin_ids = {code: str(raw_coin_ids.get(code, "")) for code in rates if raw_coin_ids.get(code)}
+            raw_errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+            return RateSnapshot(
+                rates=rates,
+                names=names,
+                kinds=kinds,
+                changes=changes,
+                fetched_at=str(data.get("fetched_at") or ""),
+                fiat_updated_at=str(data.get("fiat_updated_at") or ""),
+                errors=[str(item) for item in raw_errors[:20]],
+                coin_ids=coin_ids,
+            )
         except (OSError, ValueError, TypeError):
             return RateSnapshot.empty()
 
@@ -263,9 +307,20 @@ class RateService:
         self.cache_limit_mb = max(0, int(limit_mb))
         self.enforce_cache_limit()
 
+    def _managed_cache_files(self) -> list[Path]:
+        if not self.data_dir.exists():
+            return []
+        try:
+            return [
+                path for path in self.data_dir.iterdir()
+                if path.is_file() and any(path.match(pattern) for pattern in MANAGED_CACHE_PATTERNS)
+            ]
+        except OSError:
+            return []
+
     def cache_size_bytes(self) -> int:
         try:
-            return sum(path.stat().st_size for path in self.data_dir.rglob("*") if path.is_file())
+            return sum(path.stat().st_size for path in self._managed_cache_files())
         except OSError:
             return 0
 
@@ -274,7 +329,7 @@ class RateService:
             return
         limit = self.cache_limit_mb * 1024 * 1024
         try:
-            files = [path for path in self.data_dir.rglob("*") if path.is_file()]
+            files = self._managed_cache_files()
             total = sum(path.stat().st_size for path in files)
             removable = sorted(
                 (path for path in files if path.resolve() != self.cache_path.resolve()),
@@ -290,14 +345,9 @@ class RateService:
             pass
 
     def clear_cache(self) -> None:
-        if not self.data_dir.exists():
-            return
-        for path in sorted(self.data_dir.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        for path in self._managed_cache_files():
             try:
-                if path.is_file():
-                    path.unlink()
-                elif path.is_dir():
-                    path.rmdir()
+                path.unlink()
             except OSError:
                 pass
 
@@ -347,6 +397,7 @@ class RateService:
         fiat_history_rows: list[dict[str, Any]] | None = None
         crypto_rows: list[dict[str, Any]] | None = None
         crypto_primary_error: Exception | None = None
+        primary_updated = False
         if section == "all":
             with ThreadPoolExecutor(max_workers=3, thread_name_prefix="rates") as executor:
                 fiat_future = executor.submit(self._fetch_fiat_payload)
@@ -397,7 +448,16 @@ class RateService:
                 payload = fiat_payload
                 if payload.get("result") != "success" or not payload.get("rates"):
                     raise ValueError("返回数据无效")
-                fiat_rates = {str(code): float(value) for code, value in payload["rates"].items()}
+                fiat_rates = {}
+                for code, raw_value in payload["rates"].items():
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(value) and value > 0:
+                        fiat_rates[str(code).upper()] = value
+                if not fiat_rates or "USD" not in fiat_rates:
+                    raise ValueError("返回数据中没有有效汇率")
                 for code in [key for key, kind in kinds.items() if kind == "fiat"]:
                     rates.pop(code, None)
                     names.pop(code, None)
@@ -411,12 +471,14 @@ class RateService:
                 unix_time = payload.get("time_last_update_unix")
                 if unix_time:
                     fiat_updated = datetime.fromtimestamp(int(unix_time), timezone.utc).astimezone().isoformat()
+                primary_updated = True
             except Exception as exc:
                 errors.append(f"法币数据：{type(exc).__name__}")
 
         if section in {"all", "crypto"} and crypto_rows is not None:
             try:
                 self._apply_binance_rows(crypto_rows, rates, names, kinds, changes, coin_ids)
+                primary_updated = True
             except Exception as exc:
                 errors.append(f"虚拟币数据：{type(exc).__name__}")
         elif section in {"all", "crypto"}:
@@ -427,23 +489,38 @@ class RateService:
                 if not isinstance(coins, list) or not coins or "CNY" not in rates:
                     raise ValueError("返回数据无效")
                 cny_per_usd = rates["CNY"]
+                applied = 0
                 for coin in coins:
                     code = str(coin.get("symbol", "")).upper()
-                    cny_price = coin.get("current_price")
-                    if not code or not cny_price or (code in rates and kinds.get(code) == "fiat"):
+                    if not code or (code in rates and kinds.get(code) == "fiat"):
                         continue
-                    usd_price = float(cny_price) / cny_per_usd
+                    try:
+                        cny_price = float(coin.get("current_price") or 0)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if not math.isfinite(cny_price) or cny_price <= 0:
+                        continue
+                    usd_price = cny_price / cny_per_usd
                     rates[code] = 1.0 / usd_price
                     names[code] = str(coin.get("name") or code)
                     kinds[code] = "crypto"
                     coin_ids[code] = str(coin.get("id") or "")
-                    change = coin.get("price_change_percentage_24h")
-                    changes[code] = float(change) if change is not None else None
+                    try:
+                        change = float(coin.get("price_change_percentage_24h"))
+                    except (TypeError, ValueError, OverflowError):
+                        change = None
+                    changes[code] = change if change is not None and math.isfinite(change) else None
+                    applied += 1
+                if not applied:
+                    raise ValueError("备用源没有有效行情")
+                primary_updated = True
                 errors.append(f"虚拟币批量源：{type(crypto_primary_error).__name__ if crypto_primary_error else '未知错误'}，已切换备用源")
             except Exception as exc:
                 primary_name = type(crypto_primary_error).__name__ if crypto_primary_error else "未知错误"
                 errors.append(f"虚拟币：{primary_name}/{type(exc).__name__}")
 
+        if not primary_updated:
+            raise ConnectionError("联网更新失败，继续使用上次缓存")
         if not rates:
             raise ConnectionError("暂时无法获取汇率，且本机没有可用缓存")
         fetched_at = datetime.now().astimezone().isoformat()
@@ -460,25 +537,36 @@ class RateService:
         kinds: dict[str, str],
         changes: dict[str, float | None],
         coin_ids: dict[str, str],
-    ) -> None:
+    ) -> int:
         rates["USDT"] = 1.0
         names["USDT"] = "Tether"
         kinds["USDT"] = "crypto"
         changes["USDT"] = 0.0
         coin_ids.setdefault("USDT", "tether")
+        applied = 0
         for row in rows:
             symbol = str(row.get("symbol", ""))
             if not symbol.endswith("USDT"):
                 continue
             code = symbol[:-4]
-            last_price = float(row.get("lastPrice") or 0)
-            open_price = float(row.get("openPrice") or 0)
-            if code not in BINANCE_CRYPTOS or last_price <= 0:
+            try:
+                last_price = float(row.get("lastPrice") or 0)
+                open_price = float(row.get("openPrice") or 0)
+            except (TypeError, ValueError):
+                continue
+            if code not in BINANCE_CRYPTOS or not math.isfinite(last_price) or last_price <= 0:
                 continue
             rates[code] = 1.0 / last_price
             names[code] = BINANCE_CRYPTOS[code]
             kinds[code] = "crypto"
-            changes[code] = ((last_price / open_price) - 1) * 100 if open_price else None
+            changes[code] = (
+                ((last_price / open_price) - 1) * 100
+                if math.isfinite(open_price) and open_price > 0 else None
+            )
+            applied += 1
+        if not applied:
+            raise ValueError("批量行情中没有有效价格")
+        return applied
 
     def _merge_binance_crypto(
         self,
@@ -503,8 +591,20 @@ class RateService:
     def convert(self, amount: float, source: str, target: str) -> float:
         if source not in self.snapshot.rates or target not in self.snapshot.rates:
             raise ValueError("尚无所选币种的汇率")
-        usd_value = amount / self.snapshot.rates[source]
-        return usd_value * self.snapshot.rates[target]
+        try:
+            amount_value = float(amount)
+            source_rate = float(self.snapshot.rates[source])
+            target_rate = float(self.snapshot.rates[target])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("金额或汇率无效") from exc
+        if not all(math.isfinite(value) for value in (amount_value, source_rate, target_rate)):
+            raise ValueError("金额或汇率无效")
+        if source_rate <= 0 or target_rate <= 0:
+            raise ValueError("汇率必须大于零")
+        result = amount_value / source_rate * target_rate
+        if not math.isfinite(result):
+            raise ValueError("换算结果超出范围")
+        return result
 
     def fetch_market_chart(self, code: str, days: int = 7) -> list[tuple[int, float]]:
         """Return timestamp/CNY price points, falling back to the last local chart cache."""

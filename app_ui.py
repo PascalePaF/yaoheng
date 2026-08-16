@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import json
-import math
 import os
 import shutil
 import sys
@@ -656,6 +655,7 @@ class CalculatorPage(tk.Frame):
         )
         self.expression_entry.grid(row=0, column=0, sticky="ew", padx=26, pady=(23, 0))
         self.expression_entry.bind("<FocusIn>", self._expression_focus_in)
+        self.expression_entry.bind("<KeyPress>", self._expression_keypress, add="+")
         self.expression_entry.bind("<Return>", self._evaluate_manual_expression)
         self.expression_entry.bind("<KP_Enter>", self._evaluate_manual_expression)
         self.expression_var.trace_add("write", self._manual_expression_changed)
@@ -714,11 +714,12 @@ class CalculatorPage(tk.Frame):
     def copy_current_result(self) -> None:
         result = self.result_var.get() or "0"
         if self.copy_result_format == "grouped":
-            try:
-                number = float(result.replace(",", ""))
-                result = f"{number:,.12f}".rstrip("0").rstrip(".")
-            except ValueError:
-                pass
+            plain = result.replace(",", "")
+            sign = "-" if plain.startswith("-") else ""
+            unsigned = plain[1:] if sign else plain
+            whole, dot, fraction = unsigned.partition(".")
+            if whole.isdigit() and (not dot or fraction.isdigit()):
+                result = sign + f"{int(whole):,}" + (dot + fraction if fraction else "")
         elif self.copy_result_format == "formula":
             result = f"{self.expression_var.get()} = {result}"
         self.clipboard_clear()
@@ -796,6 +797,12 @@ class CalculatorPage(tk.Frame):
     def _expression_focus_in(self, _event: tk.Event) -> None:
         if self.expression_var.get() == "0":
             self.expression_entry.selection_range(0, tk.END)
+
+    def _expression_keypress(self, event: tk.Event) -> str | None:
+        if event.char == "=":
+            self.after_idle(self._evaluate_manual_expression)
+            return "break"
+        return None
 
     def _manual_expression_changed(self, *_args) -> None:
         if self._updating_expression:
@@ -1050,13 +1057,12 @@ class DualConverterPage(tk.Frame):
 
     @staticmethod
     def _format(value: float) -> str:
-        if value == 0:
-            return "0"
-        if abs(value) >= 1000:
-            return f"{value:,.4f}".rstrip("0").rstrip(".")
-        if abs(value) >= 1:
-            return f"{value:.8f}".rstrip("0").rstrip(".")
-        return f"{value:.12f}".rstrip("0").rstrip(".")
+        rendered = format_number(value)
+        if "e" in rendered.lower() or abs(value) < 1000:
+            return rendered
+        whole, dot, fraction = rendered.partition(".")
+        grouped = f"{int(whole):,}"
+        return grouped + (dot + fraction if fraction else "")
 
     def _code(self, display: str) -> str:
         return self.display_to_code.get(display, "")
@@ -1534,12 +1540,12 @@ class PriceChart(tk.Canvas):
             self.create_line(left, y, right, y, fill=COLORS["grid"], width=1)
             self.create_text(right + 8, y, text=self.number(value), fill=COLORS["muted"], font=("Segoe UI", 8), anchor="w")
         step = max(1, len(self.points) // 500)
-        sampled = self.points[::step]
-        if sampled[-1] != self.points[-1]:
-            sampled.append(self.points[-1])
+        sampled_indexes = list(range(0, len(self.points), step))
+        if sampled_indexes[-1] != len(self.points) - 1:
+            sampled_indexes.append(len(self.points) - 1)
         coords: list[float] = []
-        for timestamp, value in sampled:
-            original_index = min(range(len(self.points)), key=lambda i: abs(self.points[i][0] - timestamp))
+        for original_index in sampled_indexes:
+            _timestamp, value = self.points[original_index]
             x, y = self._xy(original_index, value)
             coords.extend((x, y))
         polygon = [left, bottom] + coords + [right, bottom]
@@ -1741,7 +1747,7 @@ class MarketPage(tk.Frame):
             return f"{value / 1000:.2f}K"
         if abs(value) >= 1:
             return f"{value:.2f}"
-        return f"{value:.6f}".rstrip("0")
+        return f"{value:.6f}".rstrip("0").rstrip(".")
 
     def _fiat_code(self) -> str:
         return self.fiat_display_to_code.get(self.fiat_var.get(), "CNY")
@@ -2576,8 +2582,13 @@ class YaohengApp:
         if snapshot:
             self.last_network_at = snapshot.fetched_at
             self.apply_snapshot(snapshot, False, animated=True)
-            self.network_button.configure(text="●  汇率已联网  ↻", state="normal")
-            self._set_network_status(True, f"{self.format_timestamp(snapshot.fetched_at)} 已联网")
+            if snapshot.errors:
+                detail = "；".join(snapshot.errors[:2])
+                self.network_button.configure(text="●  部分数据已更新  ↻", state="normal")
+                self._set_network_status("partial", f"{self.format_timestamp(snapshot.fetched_at)} 部分更新 · {detail}")
+            else:
+                self.network_button.configure(text="●  汇率已联网  ↻", state="normal")
+                self._set_network_status(True, f"{self.format_timestamp(snapshot.fetched_at)} 已联网")
         else:
             now = datetime.now().astimezone().isoformat()
             self.network_button.configure(text="●  重新连接网络  ↻", state="normal")
@@ -2625,11 +2636,13 @@ class YaohengApp:
             return
         self.refresh_rates(section, automatic=True)
 
-    def _set_network_status(self, connected: bool | None, time_text: str) -> None:
+    def _set_network_status(self, connected: bool | str | None, time_text: str) -> None:
         if connected is True:
             text, bg, fg = "当前网络连接成功！", COLORS["up_fill"], COLORS["up"]
         elif connected is False:
             text, bg, fg = "当前网络连接失败！", COLORS["down_fill"], COLORS["down"]
+        elif connected == "partial":
+            text, bg, fg = "部分数据更新成功", COLORS["accent_dark"], COLORS["accent"]
         else:
             text, bg, fg = "正在更新网络状态…", COLORS["accent_dark"], COLORS["accent"]
         self.network_button.configure(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)

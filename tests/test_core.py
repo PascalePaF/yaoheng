@@ -1,10 +1,11 @@
 import math
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from calculator_core import CalculationError, CalculatorModel, SafeEvaluator, evaluate_basic_amount, format_number
-from app_ui import DualConverterPage
+from app_ui import DualConverterPage, MarketPage
 from rate_service import BINANCE_CRYPTOS, RateService, RateSnapshot, crypto_display_name, fiat_daily_changes, fiat_display_name, fiat_region, relative_rate_change
 from settings_service import AppSettings, SettingsStore, timezone_names
 
@@ -26,6 +27,25 @@ class SafeEvaluatorTests(unittest.TestCase):
     def test_scientific_radian_mode(self):
         evaluator = SafeEvaluator("RAD")
         self.assertAlmostEqual(evaluator.evaluate("cos(pi)"), -1, places=12)
+
+    def test_scientific_notation_is_not_confused_with_e_constant(self):
+        evaluator = SafeEvaluator()
+        self.assertEqual(evaluator.evaluate("1e3"), 1000)
+        self.assertAlmostEqual(evaluator.evaluate("1e-3"), 0.001)
+        self.assertAlmostEqual(evaluator.evaluate("2e"), 2 * math.e)
+
+    def test_implicit_multiplication_covers_calculator_style_input(self):
+        evaluator = SafeEvaluator()
+        self.assertEqual(evaluator.evaluate("2(3+4)"), 14)
+        self.assertEqual(evaluator.evaluate("(2+1)(4+1)"), 15)
+        self.assertAlmostEqual(evaluator.evaluate("2sin(30)"), 1.0, places=12)
+
+    def test_pasted_grouped_and_full_width_expression(self):
+        self.assertEqual(SafeEvaluator().evaluate("1,234.5＋5.5="), 1240)
+
+    def test_large_integer_arithmetic_does_not_lose_a_unit(self):
+        evaluator = SafeEvaluator()
+        self.assertEqual(evaluator.evaluate("9007199254740993+1"), 9007199254740994)
 
     def test_unsafe_expression_is_rejected(self):
         with self.assertRaises(CalculationError):
@@ -57,6 +77,35 @@ class CalculatorModelTests(unittest.TestCase):
     def test_result_format(self):
         self.assertEqual(format_number(0.1 + 0.2), "0.3")
         self.assertEqual(format_number(12.0), "12")
+        self.assertEqual(format_number(0.9999999999999), "0.9999999999999")
+        self.assertEqual(format_number(1.0000000000001), "1.0000000000001")
+
+    def test_negative_operand_can_follow_multiply_and_power(self):
+        model = CalculatorModel()
+        for token in ("5", "×", "−", "2"):
+            model.input(token)
+        self.assertEqual(model.equals(), "-10")
+
+        model.clear()
+        for token in ("2", "^", "−", "3"):
+            model.input(token)
+        self.assertEqual(model.equals(), "0.125")
+
+    def test_modulo_button_continues_as_a_binary_operator(self):
+        model = CalculatorModel()
+        for token in ("7", "%", "4"):
+            model.input(token)
+        self.assertEqual(model.equals(), "3")
+
+    def test_equals_closes_unmatched_parentheses(self):
+        model = CalculatorModel(expression="2×(3+4")
+        self.assertEqual(model.equals(), "14")
+        self.assertEqual(model.history[0], ("2×(3+4)", "14"))
+
+    def test_toggle_sign_changes_the_current_operand(self):
+        model = CalculatorModel(expression="10+2")
+        model.toggle_sign()
+        self.assertEqual(model.equals(), "8")
 
     def test_incomplete_expression_previews_zero(self):
         model = CalculatorModel(expression="50+")
@@ -125,14 +174,18 @@ class RateServiceTests(unittest.TestCase):
             self.assertEqual(points, [(1000, 72.0), (2000, 86.4)])
 
     def test_fiat_chart_parses_official_time_series(self):
+        today = datetime.now(timezone.utc).date()
+        first_day = (today - timedelta(days=2)).isoformat()
+        second_day = (today - timedelta(days=1)).isoformat()
+
         class FakeResponse:
             def raise_for_status(self):
                 return None
 
             def json(self):
                 return [
-                    {"date": "2026-07-16", "base": "USD", "quote": "CNY", "rate": 7.1},
-                    {"date": "2026-07-17", "base": "USD", "quote": "CNY", "rate": 7.2},
+                    {"date": first_day, "base": "USD", "quote": "CNY", "rate": 7.1},
+                    {"date": second_day, "base": "USD", "quote": "CNY", "rate": 7.2},
                 ]
 
         class FakeSession:
@@ -148,6 +201,64 @@ class RateServiceTests(unittest.TestCase):
             service.session = FakeSession()
             points = service.fetch_fiat_chart("USD", 7, "CNY")
             self.assertEqual([value for _, value in points], [7.1, 7.2])
+
+    def test_cache_cleanup_never_removes_unrelated_files(self):
+        with tempfile.TemporaryDirectory() as path:
+            data_dir = Path(path)
+            (data_dir / "rates_cache.json").write_text("{}", encoding="utf-8")
+            (data_dir / "chart_bitcoin_7.json").write_text("[]", encoding="utf-8")
+            (data_dir / "notes.txt").write_text("keep me", encoding="utf-8")
+            unrelated = data_dir / "other-app"
+            unrelated.mkdir()
+            (unrelated / "data.json").write_text("keep me too", encoding="utf-8")
+
+            service = RateService(data_dir)
+            self.assertEqual(service.cache_size_bytes(), 4)
+            service.clear_cache()
+
+            self.assertFalse((data_dir / "rates_cache.json").exists())
+            self.assertFalse((data_dir / "chart_bitcoin_7.json").exists())
+            self.assertEqual((data_dir / "notes.txt").read_text(encoding="utf-8"), "keep me")
+            self.assertTrue((unrelated / "data.json").exists())
+
+    def test_cache_limit_only_evicts_managed_chart_files(self):
+        with tempfile.TemporaryDirectory() as path:
+            data_dir = Path(path)
+            chart = data_dir / "chart_bitcoin_7.json"
+            chart.write_bytes(b"x" * (2 * 1024 * 1024))
+            notes = data_dir / "notes.bin"
+            notes.write_bytes(b"y" * (2 * 1024 * 1024))
+            service = RateService(data_dir)
+            service.set_cache_limit(1)
+            self.assertFalse(chart.exists())
+            self.assertTrue(notes.exists())
+
+    def test_convert_rejects_invalid_amounts_and_rates(self):
+        with tempfile.TemporaryDirectory() as path:
+            service = RateService(Path(path))
+            service.snapshot = RateSnapshot(
+                rates={"USD": 1, "CNY": 7.2, "BAD": 0}, names={}, kinds={}, changes={}, fetched_at="",
+            )
+            with self.assertRaises(ValueError):
+                service.convert(float("nan"), "USD", "CNY")
+            with self.assertRaises(ValueError):
+                service.convert(1, "BAD", "CNY")
+
+    def test_failed_refresh_does_not_claim_cached_rates_are_fresh(self):
+        class OfflineSession:
+            def get(self, *_args, **_kwargs):
+                raise OSError("offline")
+
+        with tempfile.TemporaryDirectory() as path:
+            service = RateService(Path(path))
+            service.snapshot = RateSnapshot(
+                rates={"USD": 1, "CNY": 7.2}, names={},
+                kinds={"USD": "fiat", "CNY": "fiat"}, changes={}, fetched_at="old",
+            )
+            service.session = OfflineSession()
+            with self.assertRaises(ConnectionError):
+                service.refresh("fiat")
+            self.assertEqual(service.snapshot.fetched_at, "old")
 
     def test_fiat_daily_changes_and_cross_rate(self):
         changes = fiat_daily_changes([
@@ -233,10 +344,28 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(validated.close_action, "exit")
         self.assertEqual(validated.calculator_angle_mode, "DEG")
 
+    def test_malformed_individual_settings_fall_back_without_resetting_everything(self):
+        settings = AppSettings(
+            theme="light", fiat_refresh_minutes="bad", crypto_refresh_minutes=None,
+            history_limit="oops", cache_limit_mb=[], keep_data_with_app="false",
+        )
+        validated = SettingsStore.validate(settings)
+        self.assertEqual(validated.theme, "light")
+        self.assertEqual(validated.fiat_refresh_minutes, 60)
+        self.assertEqual(validated.crypto_refresh_minutes, 10)
+        self.assertEqual(validated.history_limit, 30)
+        self.assertEqual(validated.cache_limit_mb, 500)
+        self.assertFalse(validated.keep_data_with_app)
+
 
 class UiRegressionTests(unittest.TestCase):
     def test_converter_does_not_shadow_tk_callback_registration(self):
         self.assertNotIn("_register", DualConverterPage.__dict__)
+
+    def test_financial_display_keeps_small_values_and_grouping(self):
+        self.assertEqual(DualConverterPage._format(1234567.890123), "1,234,567.890123")
+        self.assertEqual(DualConverterPage._format(0.0000000000001), "1e-13")
+        self.assertEqual(MarketPage.compact(0), "0")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ release/
 
 # 运行时缓存（程序会自动重新生成）
 data/*.json
+/app_settings.json
+*.tmp
 
 # 编辑器与系统文件
 .idea/
