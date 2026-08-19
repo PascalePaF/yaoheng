@@ -337,7 +337,7 @@ class RateService:
         self.data_dir = Path(data_dir) if data_dir is not None else portable_dir() / "data"
         self.cache_path = self.data_dir / "rates_cache.json"
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Yaoheng/3.14 (Windows portable)"})
+        self.session.headers.update({"User-Agent": "Yaoheng/3.15 (Windows portable)"})
         self.cache_limit_mb = 0
         self.snapshot = self.load_cache()
 

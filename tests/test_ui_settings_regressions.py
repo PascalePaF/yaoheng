@@ -1,10 +1,13 @@
+import gc
 import json
 import tempfile
 import threading
+import tkinter as tk
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from app_ui import MarketPage, SettingsPage, TkAfterJobs, TkResultBridge, YaohengApp, visible_window_position
@@ -81,7 +84,7 @@ class TkTaskRegressionTests(unittest.TestCase):
         queued: list[int] = []
         page._queue_chart_load = lambda delay=0: queued.append(delay)
 
-        MarketPage._finish_chart(page, 2, "BTC", 7, [(1, 1.0), (2, 2.0)], None)
+        MarketPage._finish_chart(page, 2, "BTC", 7, "CNY", [(1, 1.0), (2, 2.0)], None)
 
         self.assertFalse(page.loading)
         self.assertEqual(queued, [0])
@@ -185,6 +188,253 @@ class TkTaskRegressionTests(unittest.TestCase):
 
         self.assertEqual(app.settings.timezone, "Asia/Tokyo")
         self.assertTrue(all(page.refresh_stamp_var.value == "最新刷新：本地时间" for page in app.pages.values()))
+
+
+class MarketFiatWatchRegressionTests(unittest.TestCase):
+    class Value:
+        def __init__(self, value="") -> None:
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value) -> None:
+            self.value = value
+
+    @staticmethod
+    def snapshot():
+        return SimpleNamespace(
+            rates={"USD": 1.0, "CNY": 7.2, "EUR": 0.9, "JPY": 150.0},
+            names={"USD": "美元", "CNY": "人民币", "EUR": "欧元", "JPY": "日元"},
+            kinds={code: "fiat" for code in ("USD", "CNY", "EUR", "JPY")},
+            changes={"USD": 0.0, "CNY": 2.0, "EUR": -1.0, "JPY": None},
+            fetched_at="2026-08-19T00:00:00+00:00",
+        )
+
+    @classmethod
+    def page(cls, snapshot, quote="CNY", mode="fiat"):
+        quote_state = cls.Value(quote)
+
+        def convert(amount, source, target):
+            return amount / snapshot.rates[source] * snapshot.rates[target]
+
+        page = MarketPage.__new__(MarketPage)
+        page.mode = mode
+        page.service = SimpleNamespace(snapshot=snapshot, convert=convert)
+        page.reference_amount_value = 1.0
+        page.watch_default_rows = []
+        page.watch_rows = []
+        page.watch_sort_reverse = {"price": True}
+        page.period_changes = {}
+        page._fiat_code = quote_state.get
+        page._set_watch_heading_arrows = lambda *_args: None
+        page._render_watch = lambda *_args: None
+        return page, quote_state
+
+    @staticmethod
+    def rows_by_code(page):
+        return {values[0]: (values, tags) for values, tags in page.watch_rows}
+
+    def test_fiat_rows_use_batch_24h_changes_before_any_chart_load(self):
+        snapshot = self.snapshot()
+        page, _quote = self.page(snapshot)
+
+        MarketPage._refresh_watchlist(page, snapshot)
+        rows = self.rows_by_code(page)
+
+        self.assertEqual(rows["USD"][0][3], "+2.0%")
+        self.assertEqual(rows["USD"][1], ("up",))
+        self.assertEqual(rows["EUR"][0][3], "+3.0%")
+        self.assertEqual(rows["EUR"][1], ("up",))
+        self.assertEqual(rows["CNY"][0][3], "0.0%")
+        self.assertEqual(rows["CNY"][1], ("flat",))
+        self.assertEqual(rows["JPY"][0][3], "—")
+        self.assertEqual(rows["JPY"][1], ())
+
+    def test_switching_quote_recomputes_prices_and_cross_change_direction(self):
+        snapshot = self.snapshot()
+        page, quote = self.page(snapshot)
+        MarketPage._refresh_watchlist(page, snapshot)
+        cny_rows = self.rows_by_code(page)
+
+        quote.set("EUR")
+        MarketPage._refresh_watchlist(page, snapshot)
+        eur_rows = self.rows_by_code(page)
+
+        self.assertEqual(cny_rows["USD"][0][2], "7.20")
+        self.assertEqual(eur_rows["USD"][0][2], "0.9")
+        self.assertEqual(eur_rows["CNY"][0][3], "-2.9%")
+        self.assertEqual(eur_rows["CNY"][1], ("down",))
+        self.assertEqual(eur_rows["EUR"][0][3], "0.0%")
+        self.assertEqual(eur_rows["EUR"][1], ("flat",))
+
+    def test_missing_change_is_not_zero_but_identity_and_real_zero_are_flat(self):
+        snapshot = SimpleNamespace(changes={"USD": 0.0, "GBP": 0.0, "JPY": None})
+
+        self.assertEqual(MarketPage._fiat_watch_change(snapshot, "GBP", "USD"), 0.0)
+        self.assertIsNone(MarketPage._fiat_watch_change(snapshot, "JPY", "USD"))
+        self.assertIsNone(MarketPage._fiat_watch_change(snapshot, "USD", "JPY"))
+        self.assertEqual(MarketPage._fiat_watch_change(snapshot, "JPY", "JPY"), 0.0)
+
+    def test_detail_period_change_does_not_pollute_fiat_list_24h_change(self):
+        snapshot = self.snapshot()
+        page, _quote = self.page(snapshot)
+        page.raw_points = [(1, 5.0), (2, 7.5)]
+        page.raw_points_quote = "CNY"
+        page.reference_amount_value = 1.0
+        page.current_code = "USD"
+        page.price_var = self.Value()
+        page.change_var = self.Value()
+        page.range_var = self.Value()
+        page.change_label = SimpleNamespace(configure=lambda **_kwargs: None)
+        page.chart = SimpleNamespace(set_data=lambda *_args: None)
+        page.period_changes = {"USD": 99.0}
+
+        MarketPage.rerender_currency(page)
+        rows = self.rows_by_code(page)
+
+        self.assertEqual(page.change_var.value, "+50.00%")
+        self.assertEqual(rows["USD"][0][3], "+2.0%")
+
+    def test_fiat_change_heading_is_explicitly_24h(self):
+        headings: dict[str, str] = {}
+        page = MarketPage.__new__(MarketPage)
+        page.mode = "fiat"
+        page.watch_table = SimpleNamespace(
+            heading=lambda column, **kwargs: headings.__setitem__(column, kwargs["text"])
+        )
+
+        MarketPage._set_watch_heading_arrows(page, "change", "↓")
+
+        self.assertEqual(headings["change"], "24h ↓")
+
+    def test_crypto_rows_keep_using_their_direct_24h_change(self):
+        snapshot = SimpleNamespace(
+            rates={"USD": 1.0, "CNY": 7.2, "BTC": 0.00002, "ETH": 0.0004},
+            names={"BTC": "Bitcoin", "ETH": "Ethereum"},
+            kinds={"USD": "fiat", "CNY": "fiat", "BTC": "crypto", "ETH": "crypto"},
+            changes={"BTC": 1.5, "ETH": 0.0},
+        )
+        page, _quote = self.page(snapshot, mode="crypto")
+
+        MarketPage._refresh_watchlist(page, snapshot)
+        rows = self.rows_by_code(page)
+
+        self.assertEqual(rows["BTC"][0][3], "+1.5%")
+        self.assertEqual(rows["BTC"][1], ("up",))
+        self.assertEqual(rows["ETH"][0][3], "+0.0%")
+        self.assertEqual(rows["ETH"][1], ("up",))
+
+    def test_fiat_chart_request_uses_only_the_selected_quote_pair(self):
+        delivered: list[tuple] = []
+        requested: list[tuple[str, int, str]] = []
+
+        def fetch_fiat_chart(code, days, quote):
+            requested.append((code, days, quote))
+            return [(1, 0.12), (2, 0.13)]
+
+        class Results:
+            @staticmethod
+            def expect() -> None:
+                return None
+
+            @staticmethod
+            def deliver(*args) -> None:
+                delivered.append(args)
+
+        class ImmediateThread:
+            def __init__(self, target, **_kwargs) -> None:
+                self.target = target
+
+            def start(self) -> None:
+                self.target()
+
+        page = MarketPage.__new__(MarketPage)
+        page.mode = "fiat"
+        page.service = SimpleNamespace(
+            snapshot=SimpleNamespace(rates={"CNY": 7.2, "EUR": 0.9}),
+            fetch_fiat_chart=fetch_fiat_chart,
+        )
+        page._fiat_code = lambda: "EUR"
+        page.current_code = "CNY"
+        page.current_days = 30
+        page.chart_load_job = None
+        page.chart_generation = 0
+        page.loading = False
+        page.status_var = self.Value()
+        page.chart_results = Results()
+
+        with patch("app_ui.threading.Thread", ImmediateThread):
+            MarketPage.load_chart(page)
+
+        self.assertEqual(requested, [("CNY", 30, "EUR")])
+        self.assertEqual(delivered[0][0:4], (1, "CNY", 30, "EUR"))
+
+    def test_late_chart_result_for_old_quote_is_rejected(self):
+        page = MarketPage.__new__(MarketPage)
+        page.mode = "fiat"
+        page.loading = True
+        page.chart_generation = 4
+        page.current_code = "USD"
+        page.current_days = 7
+        page.raw_points = [(0, 1.0)]
+        page._fiat_code = lambda: "EUR"
+        queued: list[int] = []
+        page._queue_chart_load = lambda delay=0: queued.append(delay)
+
+        MarketPage._finish_chart(page, 4, "USD", 7, "CNY", [(1, 7.0), (2, 7.2)], None)
+
+        self.assertFalse(page.loading)
+        self.assertEqual(page.raw_points, [(0, 1.0)])
+        self.assertEqual(queued, [0])
+
+    def test_real_tk_fiat_watch_lifecycle_when_display_is_available(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        root.withdraw()
+        page = None
+        try:
+            snapshot = self.snapshot()
+
+            def convert(amount, source, target):
+                return amount / snapshot.rates[source] * snapshot.rates[target]
+
+            service = SimpleNamespace(snapshot=snapshot, convert=convert)
+            page = MarketPage(root, service, lambda: None, lambda value: value, mode="fiat")
+            page.pack()
+            page.apply_snapshot(snapshot, reload_chart=False)
+            root.update_idletasks()
+
+            first_rows = {
+                page.watch_table.item(item, "values")[0]: page.watch_table.item(item)
+                for item in page.watch_table.get_children()
+            }
+            self.assertEqual(page.watch_table.heading("change", "text"), "24h ↕")
+            self.assertEqual(first_rows["USD"]["values"][3], "+2.0%")
+            self.assertEqual(first_rows["CNY"]["tags"], ["flat"])
+
+            eur_display = next(
+                display for display, code in page.fiat_display_to_code.items() if code == "EUR"
+            )
+            page.fiat_combo.set(eur_display)
+            page.rerender_currency()
+            root.update_idletasks()
+            switched_rows = {
+                page.watch_table.item(item, "values")[0]: page.watch_table.item(item)
+                for item in page.watch_table.get_children()
+            }
+            self.assertEqual(switched_rows["CNY"]["values"][3], "-2.9%")
+            self.assertEqual(switched_rows["CNY"]["tags"], ["down"])
+        finally:
+            if page is not None:
+                page.destroy()
+                root.update_idletasks()
+            root.destroy()
+            page = None
+            root = None
+            gc.collect()
 
 
 class SettingsPersistenceRegressionTests(unittest.TestCase):

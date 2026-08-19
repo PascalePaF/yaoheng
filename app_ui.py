@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import os
 import shutil
 import sys
@@ -1862,7 +1863,6 @@ class MarketPage(tk.Frame):
         self.watch_render_job: str | None = None
         self.watch_sort_reverse: dict[str, bool] = {}
         self.day_buttons: dict[int, tk.Button] = {}
-        self.period_changes: dict[str, float] = {}
         self.chart_generation = 0
         self.chart_load_job: str | None = None
         self.after_jobs = TkAfterJobs(self)
@@ -1928,7 +1928,7 @@ class MarketPage(tk.Frame):
         self.watch_table.heading("name", text="名称 ↕", command=lambda: self.sort_watch("name", False))
         self.watch_table.column("name", width=112 if self.mode == "fiat" else 150, anchor="w")
         self.watch_table.heading("price", text=("汇率 ↕" if self.mode == "fiat" else "价格 ↕"), command=lambda: self.sort_watch("price", True))
-        self.watch_table.heading("change", text=("周期 ↕" if self.mode == "fiat" else "24h ↕"), command=lambda: self.sort_watch("change", True))
+        self.watch_table.heading("change", text="24h ↕", command=lambda: self.sort_watch("change", True))
         self.watch_table.column("code", width=56 if self.mode == "fiat" else 72, anchor="w")
         self.watch_table.column("price", width=88 if self.mode == "fiat" else 86, anchor="e")
         self.watch_table.column("change", width=58, anchor="e")
@@ -1940,6 +1940,7 @@ class MarketPage(tk.Frame):
         self.watch_table.configure(yscrollcommand=self._watch_scrolled)
         self.watch_table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
         self.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
+        self.watch_table.tag_configure("flat", background=COLORS["card_alt"], foreground=COLORS["text"])
         self.watch_selection_border = TreeSelectionBorder(self.watch_table)
         self.watch_table.bind("<Double-Button-1>", self.select_coin)
 
@@ -1952,7 +1953,7 @@ class MarketPage(tk.Frame):
         tools.grid_columnconfigure(4, weight=1)
         tk.Label(tools, text="计价货币", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9)).grid(row=0, column=0, padx=(0, 8))
         self.fiat_combo = SearchSelect(
-            tools, self.fiat_var, command=lambda _value: self.rerender_currency(),
+            tools, self.fiat_var, command=self.change_quote,
             width=19, font_size=10, max_rows=7,
         )
         self.fiat_combo.grid(row=0, column=1, sticky="ew")
@@ -1992,6 +1993,7 @@ class MarketPage(tk.Frame):
         self.chart = PriceChart(chart_card)
         self.chart.grid(row=2, column=0, sticky="nsew", padx=16, pady=(5, 16))
         self.raw_points: list[tuple[int, float]] = []
+        self.raw_points_quote = "CNY"
         self._highlight_days()
 
     @staticmethod
@@ -2006,6 +2008,16 @@ class MarketPage(tk.Frame):
 
     def _fiat_code(self) -> str:
         return self.fiat_display_to_code.get(self.fiat_var.get(), "CNY")
+
+    @staticmethod
+    def _fiat_watch_change(snapshot: RateSnapshot, code: str, quote: str) -> float | None:
+        if code == quote:
+            return 0.0
+        try:
+            change = relative_rate_change(snapshot.changes.get(code), snapshot.changes.get(quote))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return change if change is not None and math.isfinite(change) else None
 
     def _reference_amount_keypress(self, event: tk.Event) -> str | None:
         if event.char == "=":
@@ -2088,9 +2100,17 @@ class MarketPage(tk.Frame):
         asset_kind = "fiat" if self.mode == "fiat" else "crypto"
         for code in [key for key in snapshot.rates if snapshot.kinds.get(key) == asset_kind]:
             price = self.service.convert(self.reference_amount_value, code, fiat)
-            change = self.period_changes.get(code) if self.mode == "fiat" else snapshot.changes.get(code)
-            change_text = "—" if change is None else f"{change:+.1f}%"
-            tags = () if change is None else (("up",) if change >= 0 else ("down",))
+            change = (
+                self._fiat_watch_change(snapshot, code, fiat)
+                if self.mode == "fiat" else snapshot.changes.get(code)
+            )
+            if change is None:
+                change_text, tags = "—", ()
+            elif self.mode == "fiat" and round(change, 1) == 0:
+                change_text, tags = "0.0%", ("flat",)
+            else:
+                change_text = f"{change:+.1f}%"
+                tags = ("up",) if change >= 0 else ("down",)
             if self.mode == "fiat":
                 name = fiat_display_name(code, snapshot.names.get(code, code))
                 rows.append(((code, name, self.compact(price), change_text), tags))
@@ -2183,7 +2203,7 @@ class MarketPage(tk.Frame):
             "code": "币种",
             "name": "名称",
             "price": "汇率" if self.mode == "fiat" else "价格",
-            "change": "周期" if self.mode == "fiat" else "24h",
+            "change": "24h",
         }
         columns = ("code", "name", "price", "change")
         for column in columns:
@@ -2208,6 +2228,14 @@ class MarketPage(tk.Frame):
         self._highlight_days()
         self.load_chart()
 
+    def change_quote(self, _value: str | None = None) -> None:
+        if self.mode != "fiat":
+            self.rerender_currency()
+            return
+        if self.service.snapshot.rates:
+            self._refresh_watchlist(self.service.snapshot)
+        self.load_chart()
+
     def _highlight_days(self) -> None:
         for days, button in self.day_buttons.items():
             active = days == self.current_days
@@ -2228,33 +2256,46 @@ class MarketPage(tk.Frame):
             return
         self.loading = True
         code, days = self.current_code, self.current_days
+        quote = self._fiat_code() if self.mode == "fiat" else "CNY"
         self.status_var.set(f"正在加载 {code} 的 {days} 日趋势…")
         self.chart_results.expect()
 
         def worker() -> None:
             try:
                 points = (
-                    self.service.fetch_fiat_chart(code, days, "CNY") if self.mode == "fiat" else
+                    self.service.fetch_fiat_chart(code, days, quote) if self.mode == "fiat" else
                     self.service.fetch_market_chart(code, days)
                 )
-                self.chart_results.deliver(generation, code, days, points, None)
+                self.chart_results.deliver(generation, code, days, quote, points, None)
             except Exception as exc:
-                self.chart_results.deliver(generation, code, days, [], str(exc))
+                self.chart_results.deliver(generation, code, days, quote, [], str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_chart(self, generation: int, code: str, days: int, points: list[tuple[int, float]], error: str | None) -> None:
+    def _finish_chart(
+        self,
+        generation: int,
+        code: str,
+        days: int,
+        quote: str,
+        points: list[tuple[int, float]],
+        error: str | None,
+    ) -> None:
         self.loading = False
-        if generation != self.chart_generation or code != self.current_code or days != self.current_days:
+        if (
+            generation != self.chart_generation
+            or code != self.current_code
+            or days != self.current_days
+            or (self.mode == "fiat" and quote != self._fiat_code())
+        ):
             self._queue_chart_load()
             return
         if error:
             self.status_var.set(error)
             return
         self.raw_points = points
+        self.raw_points_quote = quote
         self.status_var.set(f"{code} · {days} 日行情 · 鼠标移入图表可查看具体时点")
-        if self.mode == "fiat" and len(points) >= 2 and points[0][1]:
-            self.period_changes[code] = (points[-1][1] / points[0][1] - 1) * 100
         self.rerender_currency()
 
     def _queue_chart_load(self, delay: int = 0) -> None:
@@ -2291,7 +2332,22 @@ class MarketPage(tk.Frame):
                 self._refresh_watchlist(self.service.snapshot)
             return
         fiat = self._fiat_code()
-        converted = [(stamp, self.service.convert(value * self.reference_amount_value, "CNY", fiat)) for stamp, value in self.raw_points]
+        if self.mode == "fiat":
+            if self.raw_points_quote != fiat:
+                if refresh_watchlist:
+                    self._refresh_watchlist(self.service.snapshot)
+                if not self.loading:
+                    self._queue_chart_load()
+                return
+            converted = [
+                (stamp, value * self.reference_amount_value)
+                for stamp, value in self.raw_points
+            ]
+        else:
+            converted = [
+                (stamp, self.service.convert(value * self.reference_amount_value, "CNY", fiat))
+                for stamp, value in self.raw_points
+            ]
         self.chart.set_data(converted, fiat)
         values = [value for _, value in converted]
         first, last = values[0], values[-1]
@@ -3328,6 +3384,7 @@ class YaohengApp:
             if isinstance(market, MarketPage):
                 market.watch_table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
                 market.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
+                market.watch_table.tag_configure("flat", background=COLORS["card_alt"], foreground=COLORS["text"])
                 market.chart.configure(bg=COLORS["card"])
                 market.chart.redraw()
                 market._highlight_days()
