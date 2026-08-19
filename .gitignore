@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+.venv-build/
 venv/
 
 # 本地构建中间产物

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import json
 import os
 import shutil
 import sys
@@ -11,6 +10,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -83,6 +83,26 @@ BRAND_ORANGE = "#FF9D2E"
 BRAND_DARK = "#171717"
 
 
+def visible_window_position(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    screen_bounds: tuple[int, int, int, int],
+    minimum_visible: int = 80,
+) -> tuple[int, int]:
+    """Return a usable position when a remembered window is fully off-screen."""
+    left, top, screen_width, screen_height = screen_bounds
+    right, bottom = left + max(1, screen_width), top + max(1, screen_height)
+    visible_width = max(0, min(x + width, right) - max(x, left))
+    visible_height = max(0, min(y + height, bottom) - max(y, top))
+    if visible_width >= min(minimum_visible, width) and visible_height >= min(minimum_visible, height):
+        return x, y
+    max_x = max(left, right - width)
+    max_y = max(top, bottom - height)
+    return max(left, min(x, max_x)), max(top, min(y, max_y))
+
+
 def enable_dpi_awareness() -> None:
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -135,6 +155,111 @@ def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
         return [int(small_handle), int(big_handle)]
     except (AttributeError, OSError, tk.TclError):
         return []
+
+
+class TkResultBridge:
+    """Move worker results to Tk without invoking any Tcl command off-thread."""
+
+    def __init__(
+        self,
+        owner: tk.Misc,
+        callback: Callable[..., None],
+        poll_ms: int = 25,
+    ) -> None:
+        self.owner = owner
+        self.callback = callback
+        self.poll_ms = max(1, poll_ms)
+        self._poll_delay = self.poll_ms
+        self._results: SimpleQueue[tuple[object, ...]] = SimpleQueue()
+        self._pending = 0
+        self._poll_job: str | None = None
+        self._closed = False
+
+    def expect(self) -> None:
+        if self._closed:
+            return
+        self._pending += 1
+        self._ensure_poll()
+
+    def deliver(self, *payload: object) -> None:
+        if not self._closed:
+            self._results.put(payload)
+
+    def _ensure_poll(self) -> None:
+        if self._closed or self._poll_job is not None:
+            return
+        try:
+            self._poll_job = self.owner.after(self._poll_delay, self._poll)
+        except tk.TclError:
+            self.close()
+
+    def _poll(self) -> None:
+        self._poll_job = None
+        if self._closed:
+            return
+        delivered = False
+        while self._pending:
+            try:
+                payload = self._results.get_nowait()
+            except Empty:
+                break
+            self._pending -= 1
+            delivered = True
+            self.callback(*payload)
+            if self._closed:
+                return
+        if self._pending:
+            self._poll_delay = self.poll_ms if delivered else min(250, max(self.poll_ms, self._poll_delay * 2))
+            self._ensure_poll()
+        else:
+            self._poll_delay = self.poll_ms
+
+    def close(self) -> None:
+        self._closed = True
+        self._pending = 0
+        if self._poll_job is not None:
+            try:
+                self.owner.after_cancel(self._poll_job)
+            except tk.TclError:
+                pass
+            self._poll_job = None
+
+
+class TkAfterJobs:
+    """Own short-lived Tk callbacks so widget destruction can cancel them cleanly."""
+
+    def __init__(self, owner: tk.Misc) -> None:
+        self.owner = owner
+        self.jobs: set[str] = set()
+        self.closed = False
+
+    def schedule(self, delay: int, callback: Callable[[], None], idle: bool = False) -> str | None:
+        if self.closed:
+            return None
+        holder: list[str] = []
+
+        def run() -> None:
+            if holder:
+                self.jobs.discard(holder[0])
+            if not self.closed:
+                callback()
+
+        try:
+            job = self.owner.after_idle(run) if idle else self.owner.after(delay, run)
+        except tk.TclError:
+            return None
+        holder.append(job)
+        self.jobs.add(job)
+        return job
+
+    def cancel_all(self) -> None:
+        self.closed = True
+        for job in tuple(self.jobs):
+            try:
+                self.owner.after_cancel(job)
+            except tk.TclError:
+                pass
+        self.jobs.clear()
 
 
 class AppButton(tk.Button):
@@ -209,6 +334,9 @@ class SearchSelect(tk.Frame):
         self.active_index = 0
         self._hiding_job: str | None = None
         self._follow_job: str | None = None
+        self._focus_job: str | None = None
+        self._open_job: str | None = None
+        self._position_job: str | None = None
         self._suppress_focus_open = False
         self.grid_columnconfigure(0, weight=1)
         self.entry = tk.Entry(
@@ -225,7 +353,7 @@ class SearchSelect(tk.Frame):
             font=("Segoe UI Symbol", 10, "bold"), padx=7,
         )
         self.arrow.grid(row=0, column=1, sticky="ns")
-        self.entry.bind("<Button-1>", lambda _e: self.after_idle(self.open), add="+")
+        self.entry.bind("<Button-1>", self._entry_clicked, add="+")
         self.entry.bind("<FocusIn>", self._focus_in)
         self.entry.bind("<FocusOut>", self._focus_out)
         self.entry.bind("<KeyRelease>", self._typed)
@@ -254,10 +382,15 @@ class SearchSelect(tk.Frame):
                 self.command(value)
 
     def set_values(self, values: list[str]) -> None:
-        self.values = list(values)
+        updated = list(values)
+        if updated == self.values:
+            return
+        self.values = updated
         self._filter(self.variable.get() if self.allow_free_text else "")
 
     def focus_input(self) -> None:
+        if self.focus_get() is not self.entry:
+            self._suppress_focus_open = True
         self.entry.focus_set()
         self.entry.selection_range(0, tk.END)
         self.open()
@@ -289,14 +422,23 @@ class SearchSelect(tk.Frame):
             self._follow_job = self.after(30, self._follow_anchor)
 
     def close(self) -> str:
-        if self.popup is not None and self.popup.winfo_exists():
-            self.popup.withdraw()
+        try:
+            if self.popup is not None and self.popup.winfo_exists():
+                self.popup.withdraw()
+        except tk.TclError:
+            pass
         if self._follow_job is not None:
-            self.after_cancel(self._follow_job)
+            try:
+                self.after_cancel(self._follow_job)
+            except tk.TclError:
+                pass
             self._follow_job = None
-        root = self.winfo_toplevel()
-        if getattr(root, "_active_search_select", None) is self:
-            setattr(root, "_active_search_select", None)
+        try:
+            root = self.winfo_toplevel()
+            if getattr(root, "_active_search_select", None) is self:
+                setattr(root, "_active_search_select", None)
+        except tk.TclError:
+            pass
         return "break"
 
     def _create_popup(self) -> None:
@@ -343,14 +485,26 @@ class SearchSelect(tk.Frame):
 
     def _anchor_changed(self, _event: tk.Event | None = None) -> None:
         if self.popup is not None and self.popup.winfo_exists() and self.popup.winfo_viewable():
-            self.after_idle(self._position_popup)
+            if self._position_job is None:
+                self._position_job = self.after_idle(self._position_popup_idle)
+
+    def _position_popup_idle(self) -> None:
+        self._position_job = None
+        try:
+            if self.winfo_exists() and self.popup is not None and self.popup.winfo_exists():
+                self._position_popup()
+        except tk.TclError:
+            return
 
     def _follow_anchor(self) -> None:
         self._follow_job = None
-        if self.popup is None or not self.popup.winfo_exists() or not self.popup.winfo_viewable():
+        try:
+            if self.popup is None or not self.popup.winfo_exists() or not self.popup.winfo_viewable():
+                return
+            self._position_popup()
+            self._follow_job = self.after(30, self._follow_anchor)
+        except tk.TclError:
             return
-        self._position_popup()
-        self._follow_job = self.after(30, self._follow_anchor)
 
     def _root_unmapped(self, event: tk.Event) -> None:
         if event.widget is self.winfo_toplevel():
@@ -366,8 +520,8 @@ class SearchSelect(tk.Frame):
         if self.listbox is None:
             return
         self.listbox.delete(0, tk.END)
-        for value in self.filtered_values:
-            self.listbox.insert(tk.END, value)
+        if self.filtered_values:
+            self.listbox.insert(tk.END, *self.filtered_values)
         self._highlight_active()
 
     def _highlight_active(self) -> None:
@@ -383,16 +537,41 @@ class SearchSelect(tk.Frame):
         if self._suppress_focus_open:
             self._suppress_focus_open = False
             return
-        self.after_idle(self._select_all_and_open)
+        if self._focus_job is None:
+            self._focus_job = self.after_idle(self._select_all_and_open)
+
+    def _entry_clicked(self, _event: tk.Event) -> None:
+        try:
+            if self.focus_get() is self.entry and self._open_job is None:
+                self._open_job = self.after_idle(self._open_idle)
+        except tk.TclError:
+            return
+
+    def _open_idle(self) -> None:
+        self._open_job = None
+        try:
+            if self.winfo_exists() and self.focus_get() is self.entry:
+                self.open()
+        except tk.TclError:
+            return
 
     def _select_all_and_open(self) -> None:
-        self.entry.selection_range(0, tk.END)
-        self.entry.icursor(tk.END)
-        self.open()
+        self._focus_job = None
+        try:
+            if not self.winfo_exists() or self.focus_get() is not self.entry:
+                return
+            self.entry.selection_range(0, tk.END)
+            self.entry.icursor(tk.END)
+            self.open()
+        except tk.TclError:
+            return
 
     def _focus_out(self, _event: tk.Event) -> None:
         if self._hiding_job:
-            self.after_cancel(self._hiding_job)
+            try:
+                self.after_cancel(self._hiding_job)
+            except tk.TclError:
+                pass
         self._hiding_job = self.after(150, self._resolve_and_close)
 
     def _resolve_and_close(self) -> None:
@@ -440,7 +619,10 @@ class SearchSelect(tk.Frame):
 
     def _select_value(self, value: str, refocus: bool = True) -> None:
         if self._hiding_job:
-            self.after_cancel(self._hiding_job)
+            try:
+                self.after_cancel(self._hiding_job)
+            except tk.TclError:
+                pass
             self._hiding_job = None
         self.variable.set(value)
         self.selected_value = value
@@ -503,15 +685,26 @@ class SearchSelect(tk.Frame):
                 )
 
     def _destroy_popup(self, event: tk.Event) -> None:
-        if event.widget is self and self.popup is not None and self.popup.winfo_exists():
-            self.popup.destroy()
         if event.widget is self:
-            root = self.winfo_toplevel()
+            for attr in ("_hiding_job", "_follow_job", "_focus_job", "_open_job", "_position_job"):
+                job = getattr(self, attr, None)
+                if job is not None:
+                    try:
+                        self.after_cancel(job)
+                    except tk.TclError:
+                        pass
+                    setattr(self, attr, None)
             try:
+                root = self.winfo_toplevel()
                 if self._root_configure_binding:
                     root.unbind("<Configure>", self._root_configure_binding)
                 if self._root_unmap_binding:
                     root.unbind("<Unmap>", self._root_unmap_binding)
+            except tk.TclError:
+                pass
+            try:
+                if self.popup is not None and self.popup.winfo_exists():
+                    self.popup.destroy()
             except tk.TclError:
                 pass
 
@@ -523,19 +716,26 @@ class TreeSelectionBorder:
         self.tree = tree
         self.thickness = thickness
         self.frames = [tk.Frame(tree, bg="#000000", bd=0, highlightthickness=0) for _ in range(4)]
-        self.job: str | None = None
+        self.idle_job: str | None = None
         tree.bind("<<TreeviewSelect>>", self._schedule, add="+")
         tree.bind("<Configure>", self._schedule, add="+")
         tree.bind("<MouseWheel>", self._schedule, add="+")
         tree.bind("<KeyRelease>", self._schedule, add="+")
         tree.bind("<Destroy>", self._destroy, add="+")
-        self.job = tree.after(60, self._poll)
 
     def _schedule(self, _event: tk.Event | None = None) -> None:
         try:
-            self.tree.after_idle(self.refresh)
+            if self.idle_job is None:
+                self.idle_job = self.tree.after_idle(self._refresh_idle)
         except tk.TclError:
             pass
+
+    def _refresh_idle(self) -> None:
+        self.idle_job = None
+        try:
+            self.refresh()
+        except tk.TclError:
+            return
 
     def refresh(self) -> None:
         if not self.tree.winfo_exists():
@@ -558,23 +758,14 @@ class TreeSelectionBorder:
             frame.place(x=left, y=top, width=frame_width, height=frame_height)
             frame.lift()
 
-    def _poll(self) -> None:
-        self.job = None
-        try:
-            if not self.tree.winfo_exists():
-                return
-            self.refresh()
-            self.job = self.tree.after(60, self._poll)
-        except tk.TclError:
-            return
-
     def _destroy(self, event: tk.Event) -> None:
-        if event.widget is self.tree and self.job is not None:
-            try:
-                self.tree.after_cancel(self.job)
-            except tk.TclError:
-                pass
-            self.job = None
+        if event.widget is self.tree:
+            if self.idle_job is not None:
+                try:
+                    self.tree.after_cancel(self.idle_job)
+                except tk.TclError:
+                    pass
+                self.idle_job = None
 
 
 class CalculatorPage(tk.Frame):
@@ -621,7 +812,9 @@ class CalculatorPage(tk.Frame):
         self.result_var = tk.StringVar(value="0")
         self.mode_var = tk.StringVar(value="标准模式 · 4 × 5 键盘 · 可直接输入公式")
         self._updating_expression = False
+        self.after_jobs = TkAfterJobs(self)
         self._build()
+        self.bind("<Destroy>", self._destroy_jobs, add="+")
         self.set_mode_immediate(initial_professional)
         self.refresh_display()
 
@@ -725,7 +918,7 @@ class CalculatorPage(tk.Frame):
         self.clipboard_clear()
         self.clipboard_append(result)
         self.copy_button.configure(text="已复制")
-        self.after(900, lambda: self.copy_button.configure(text="复制结果"))
+        self.after_jobs.schedule(900, lambda: self.copy_button.configure(text="复制结果"))
 
     def toggle_mode(self) -> None:
         if self.animating:
@@ -749,7 +942,7 @@ class CalculatorPage(tk.Frame):
             )
             self.pro_frame.place(relx=0, rely=0, relwidth=1, relheight=max(0.01, 0.375 * progress))
             if index < frames:
-                self.after(16, lambda: step(index + 1))
+                self.after_jobs.schedule(16, lambda: step(index + 1))
                 return
             self.professional = target_professional
             self.animating = False
@@ -792,7 +985,7 @@ class CalculatorPage(tk.Frame):
             self.refresh_display()
         except CalculationError as exc:
             self.result_var.set(str(exc))
-            self.after(1700, self.refresh_display)
+            self.after_jobs.schedule(1700, self.refresh_display)
 
     def _expression_focus_in(self, _event: tk.Event) -> None:
         if self.expression_var.get() == "0":
@@ -800,7 +993,7 @@ class CalculatorPage(tk.Frame):
 
     def _expression_keypress(self, event: tk.Event) -> str | None:
         if event.char == "=":
-            self.after_idle(self._evaluate_manual_expression)
+            self.after_jobs.schedule(0, self._evaluate_manual_expression, idle=True)
             return "break"
         return None
 
@@ -824,7 +1017,7 @@ class CalculatorPage(tk.Frame):
             self.expression_entry.icursor(tk.END)
         except CalculationError as exc:
             self.result_var.set(str(exc))
-            self.after(1700, self.refresh_display)
+            self.after_jobs.schedule(1700, self.refresh_display)
         return "break"
 
     def refresh_display(self) -> None:
@@ -833,6 +1026,10 @@ class CalculatorPage(tk.Frame):
         self.expression_var.set(expression)
         self._updating_expression = False
         self.result_var.set(self.model.preview() or "0")
+
+    def _destroy_jobs(self, event: tk.Event) -> None:
+        if event.widget is self:
+            self.after_jobs.cancel_all()
 
 
 class DualConverterPage(tk.Frame):
@@ -887,10 +1084,15 @@ class DualConverterPage(tk.Frame):
         self.table_default_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.table_item_codes: dict[str, str] = {}
         self.render_generation = 0
+        self.render_job: str | None = None
+        self.action_position_job: str | None = None
+        self.action_fade_generation = 0
+        self.after_jobs = TkAfterJobs(self)
         self.sort_reverse: dict[str, bool] = {}
         self.refreshing = False
         self.spinner_job: str | None = None
         self._build()
+        self.bind("<Destroy>", self._destroy_jobs, add="+")
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -1025,7 +1227,7 @@ class DualConverterPage(tk.Frame):
         self.table_selection_border = TreeSelectionBorder(self.table)
         self.table.bind("<Double-Button-1>", self.pick_table_item)
         self.table.bind("<<TreeviewSelect>>", self._show_row_actions, add="+")
-        self.table.bind("<Configure>", lambda _event: self.after_idle(self._position_action_buttons), add="+")
+        self.table.bind("<Configure>", self._queue_action_position, add="+")
         self.favorite_button = tk.Button(
             self.table, text="☆", command=self.toggle_favorite, bg=COLORS["card"], fg=COLORS["accent"],
             activebackground=COLORS["card"], activeforeground=COLORS["accent"], relief="flat", bd=0,
@@ -1075,13 +1277,13 @@ class DualConverterPage(tk.Frame):
 
     def _amount_keypress(self, event: tk.Event, side: str) -> str | None:
         if event.char == "=":
-            self.after_idle(lambda: self.convert_from(side))
+            self.after_jobs.schedule(0, lambda: self.convert_from(side), idle=True)
             return "break"
         return None
 
     def _reference_amount_keypress(self, event: tk.Event) -> str | None:
         if event.char == "=":
-            self.after_idle(self._commit_reference_amount)
+            self.after_jobs.schedule(0, self._commit_reference_amount, idle=True)
             return "break"
         return None
 
@@ -1136,7 +1338,10 @@ class DualConverterPage(tk.Frame):
         self.convert_from(self.active_side)
         self.refreshing = False
         if self.spinner_job:
-            self.after_cancel(self.spinner_job)
+            try:
+                self.after_cancel(self.spinner_job)
+            except tk.TclError:
+                pass
             self.spinner_job = None
         self.refresh_button.configure(text="↻  刷新汇率", state="normal")
 
@@ -1168,7 +1373,10 @@ class DualConverterPage(tk.Frame):
     def finish_refresh_failure(self) -> None:
         self.refreshing = False
         if self.spinner_job:
-            self.after_cancel(self.spinner_job)
+            try:
+                self.after_cancel(self.spinner_job)
+            except tk.TclError:
+                pass
             self.spinner_job = None
         self.refresh_button.configure(text="↻  刷新汇率", state="normal")
 
@@ -1312,6 +1520,12 @@ class DualConverterPage(tk.Frame):
             return
         self.render_generation += 1
         generation = self.render_generation
+        if self.render_job is not None:
+            try:
+                self.after_cancel(self.render_job)
+            except tk.TclError:
+                pass
+            self.render_job = None
         self._hide_action_buttons()
         self._set_action_headings()
         self.table.delete(*self.table.get_children())
@@ -1327,12 +1541,15 @@ class DualConverterPage(tk.Frame):
             return
 
         def add(index: int = 0) -> None:
+            self.render_job = None
             if generation != self.render_generation or index >= len(display_rows):
                 return
-            (values, tags), pinned_copy = display_rows[index]
-            item = self.table.insert("", tk.END, values=values, tags=tags + (("pinned_copy",) if pinned_copy else ()))
-            self.table_item_codes[item] = values[0]
-            self.after(4, lambda: add(index + 1))
+            next_index = min(index + 8, len(display_rows))
+            for (values, tags), pinned_copy in display_rows[index:next_index]:
+                item = self.table.insert("", tk.END, values=values, tags=tags + (("pinned_copy",) if pinned_copy else ()))
+                self.table_item_codes[item] = values[0]
+            if next_index < len(display_rows):
+                self.render_job = self.after(12, lambda: add(next_index))
 
         add()
 
@@ -1379,11 +1596,25 @@ class DualConverterPage(tk.Frame):
 
     def _table_yview(self, *args) -> None:
         self.table.yview(*args)
-        self.after_idle(self._position_action_buttons)
+        border = getattr(self, "table_selection_border", None)
+        if border is not None:
+            border._schedule()
+        self._queue_action_position()
 
     def _table_scrolled(self, scrollbar: ttk.Scrollbar, first: str, last: str) -> None:
         scrollbar.set(first, last)
-        self.after_idle(self._position_action_buttons)
+        border = getattr(self, "table_selection_border", None)
+        if border is not None:
+            border._schedule()
+        self._queue_action_position()
+
+    def _queue_action_position(self, _event: tk.Event | None = None) -> None:
+        if self.action_position_job is None:
+            self.action_position_job = self.after_jobs.schedule(0, self._run_action_position, idle=True)
+
+    def _run_action_position(self) -> None:
+        self.action_position_job = None
+        self._position_action_buttons()
 
     def _selected_code(self) -> str:
         selected = self.table.selection()
@@ -1405,11 +1636,13 @@ class DualConverterPage(tk.Frame):
             bg=row_background, activebackground=row_background,
         )
         self._position_action_buttons()
+        self.action_fade_generation += 1
+        generation = self.action_fade_generation
         for delay, color in ((0, COLORS["muted"]), (45, COLORS["text"]), (90, COLORS["accent"])):
-            self.after(delay, lambda value=color: self._fade_action_color(value))
+            self.after_jobs.schedule(delay, lambda value=color, token=generation: self._fade_action_color(value, token))
 
-    def _fade_action_color(self, color: str) -> None:
-        if self._selected_code():
+    def _fade_action_color(self, color: str, generation: int) -> None:
+        if generation == self.action_fade_generation and self._selected_code():
             self.favorite_button.configure(fg=color)
             self.pin_button.configure(fg=color)
 
@@ -1487,6 +1720,22 @@ class DualConverterPage(tk.Frame):
             target_combo = {"a": self.combo_a, "b": self.combo_b, "c": self.combo_c}[target_side]
             target_combo.set(self.code_to_display[code])
             self.convert_from(self.active_side)
+
+    def _destroy_jobs(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        self.refreshing = False
+        self.render_generation += 1
+        self.action_fade_generation += 1
+        self.after_jobs.cancel_all()
+        for attr in ("spinner_job", "render_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
 
 
 class PriceChart(tk.Canvas):
@@ -1610,10 +1859,16 @@ class MarketPage(tk.Frame):
         self.watch_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.watch_default_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         self.watch_render_generation = 0
+        self.watch_render_job: str | None = None
         self.watch_sort_reverse: dict[str, bool] = {}
         self.day_buttons: dict[int, tk.Button] = {}
         self.period_changes: dict[str, float] = {}
+        self.chart_generation = 0
+        self.chart_load_job: str | None = None
+        self.after_jobs = TkAfterJobs(self)
+        self.chart_results = TkResultBridge(self, self._finish_chart)
         self._build()
+        self.bind("<Destroy>", self._destroy_jobs, add="+")
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -1679,10 +1934,10 @@ class MarketPage(tk.Frame):
         self.watch_table.column("change", width=58, anchor="e")
         self.watch_table.grid(row=0, column=0, sticky="nsew")
         self.watch_scrollbar = ttk.Scrollbar(
-            watch_table_frame, orient="vertical", command=self.watch_table.yview,
+            watch_table_frame, orient="vertical", command=self._watch_yview,
         )
         self.watch_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.watch_table.configure(yscrollcommand=self.watch_scrollbar.set)
+        self.watch_table.configure(yscrollcommand=self._watch_scrolled)
         self.watch_table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
         self.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
         self.watch_selection_border = TreeSelectionBorder(self.watch_table)
@@ -1754,7 +2009,7 @@ class MarketPage(tk.Frame):
 
     def _reference_amount_keypress(self, event: tk.Event) -> str | None:
         if event.char == "=":
-            self.after_idle(self._commit_reference_amount)
+            self.after_jobs.schedule(0, self._commit_reference_amount, idle=True)
             return "break"
         return None
 
@@ -1769,7 +2024,13 @@ class MarketPage(tk.Frame):
             self.status_var.set(f"参考数额输入有误：{exc}")
         return "break"
 
-    def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool = False, animated: bool = False) -> None:
+    def apply_snapshot(
+        self,
+        snapshot: RateSnapshot,
+        from_cache: bool = False,
+        animated: bool = False,
+        reload_chart: bool = True,
+    ) -> None:
         old_fiat = self._fiat_code()
         fiats = [code for code in snapshot.rates if snapshot.kinds.get(code) == "fiat"]
         priority = ["CNY", "USD", "EUR", "JPY", "HKD", "GBP", "AUD", "CAD"]
@@ -1804,8 +2065,11 @@ class MarketPage(tk.Frame):
         self.refresh_stamp_var.set(f"最新刷新：{self.timestamp_formatter(snapshot.fetched_at)}")
         self.status_var.set("双击币种查看趋势；计价货币、时间周期和表格顺序均可自由切换。")
         self.refresh_button.configure(text=("↻  刷新全部汇率" if self.mode == "fiat" else "↻  刷新全部行情"), state="normal")
-        if self.current_code in snapshot.rates and snapshot.kinds.get(self.current_code) == asset_kind:
-            self.after(120, self.load_chart)
+        if reload_chart and self.current_code in snapshot.rates and snapshot.kinds.get(self.current_code) == asset_kind:
+            self._queue_chart_load(120)
+        elif self.raw_points:
+            self.status_var.set(f"{self.current_code} · {self.current_days} 日行情 · 鼠标移入图表可查看具体时点")
+            self.rerender_currency(refresh_watchlist=False)
 
     def begin_refresh(self) -> None:
         self.watch_table.delete(*self.watch_table.get_children())
@@ -1842,6 +2106,12 @@ class MarketPage(tk.Frame):
     def _render_watch(self, animated: bool = False) -> None:
         self.watch_render_generation += 1
         generation = self.watch_render_generation
+        if self.watch_render_job is not None:
+            try:
+                self.after_cancel(self.watch_render_job)
+            except tk.TclError:
+                pass
+            self.watch_render_job = None
         self.watch_table.delete(*self.watch_table.get_children())
         query = self.market_search_var.get().strip().lower()
         if "·" in query:
@@ -1853,13 +2123,28 @@ class MarketPage(tk.Frame):
             return
 
         def add(index: int = 0) -> None:
+            self.watch_render_job = None
             if generation != self.watch_render_generation or index >= len(rows):
                 return
-            values, tags = rows[index]
-            self.watch_table.insert("", tk.END, values=values, tags=tags)
-            self.after(6, lambda: add(index + 1))
+            next_index = min(index + 8, len(rows))
+            for values, tags in rows[index:next_index]:
+                self.watch_table.insert("", tk.END, values=values, tags=tags)
+            if next_index < len(rows):
+                self.watch_render_job = self.after(12, lambda: add(next_index))
 
         add()
+
+    def _watch_yview(self, *args) -> None:
+        self.watch_table.yview(*args)
+        border = getattr(self, "watch_selection_border", None)
+        if border is not None:
+            border._schedule()
+
+    def _watch_scrolled(self, first: str, last: str) -> None:
+        self.watch_scrollbar.set(first, last)
+        border = getattr(self, "watch_selection_border", None)
+        if border is not None:
+            border._schedule()
 
     def sort_watch(self, column: str, numeric: bool) -> None:
         reverse = self.watch_sort_reverse.get(column, False)
@@ -1929,11 +2214,22 @@ class MarketPage(tk.Frame):
             button.configure(bg=COLORS["accent_dark"] if active else COLORS["card"], fg=COLORS["accent"] if active else COLORS["muted"])
 
     def load_chart(self) -> None:
-        if self.loading or not self.service.snapshot.rates:
+        if not self.service.snapshot.rates:
+            return
+        if self.chart_load_job is not None:
+            try:
+                self.after_cancel(self.chart_load_job)
+            except tk.TclError:
+                pass
+            self.chart_load_job = None
+        self.chart_generation += 1
+        generation = self.chart_generation
+        if self.loading:
             return
         self.loading = True
         code, days = self.current_code, self.current_days
         self.status_var.set(f"正在加载 {code} 的 {days} 日趋势…")
+        self.chart_results.expect()
 
         def worker() -> None:
             try:
@@ -1941,16 +2237,16 @@ class MarketPage(tk.Frame):
                     self.service.fetch_fiat_chart(code, days, "CNY") if self.mode == "fiat" else
                     self.service.fetch_market_chart(code, days)
                 )
-                self.after(0, lambda: self._finish_chart(code, days, points, None))
+                self.chart_results.deliver(generation, code, days, points, None)
             except Exception as exc:
-                self.after(0, lambda message=str(exc): self._finish_chart(code, days, [], message))
+                self.chart_results.deliver(generation, code, days, [], str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_chart(self, code: str, days: int, points: list[tuple[int, float]], error: str | None) -> None:
+    def _finish_chart(self, generation: int, code: str, days: int, points: list[tuple[int, float]], error: str | None) -> None:
         self.loading = False
-        if code != self.current_code or days != self.current_days:
-            self.after(0, self.load_chart)
+        if generation != self.chart_generation or code != self.current_code or days != self.current_days:
+            self._queue_chart_load()
             return
         if error:
             self.status_var.set(error)
@@ -1961,9 +2257,38 @@ class MarketPage(tk.Frame):
             self.period_changes[code] = (points[-1][1] / points[0][1] - 1) * 100
         self.rerender_currency()
 
-    def rerender_currency(self) -> None:
+    def _queue_chart_load(self, delay: int = 0) -> None:
+        if self.chart_load_job is not None:
+            try:
+                self.after_cancel(self.chart_load_job)
+            except tk.TclError:
+                pass
+        self.chart_load_job = self.after(delay, self._run_queued_chart_load)
+
+    def _run_queued_chart_load(self) -> None:
+        self.chart_load_job = None
+        self.load_chart()
+
+    def _destroy_jobs(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        self.chart_generation += 1
+        self.watch_render_generation += 1
+        self.after_jobs.cancel_all()
+        self.chart_results.close()
+        for attr in ("chart_load_job", "watch_render_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+
+    def rerender_currency(self, refresh_watchlist: bool = True) -> None:
         if not self.raw_points:
-            self._refresh_watchlist(self.service.snapshot)
+            if refresh_watchlist:
+                self._refresh_watchlist(self.service.snapshot)
             return
         fiat = self._fiat_code()
         converted = [(stamp, self.service.convert(value * self.reference_amount_value, "CNY", fiat)) for stamp, value in self.raw_points]
@@ -1975,7 +2300,8 @@ class MarketPage(tk.Frame):
         self.change_var.set(f"{change:+.2f}%")
         self.change_label.configure(fg=COLORS["up"] if change >= 0 else COLORS["down"])
         self.range_var.set(f"最高 {PriceChart.number(max(values))}   最低 {PriceChart.number(min(values))}")
-        self._refresh_watchlist(self.service.snapshot)
+        if refresh_watchlist:
+            self._refresh_watchlist(self.service.snapshot)
 
 
 class HistoryPanel(tk.Frame):
@@ -2057,6 +2383,7 @@ class SettingsPage(tk.Frame):
         self.exit_callback = exit_callback
         self.theme_var = tk.StringVar(value=settings.theme)
         self.timezone_var = tk.StringVar()
+        self.timezone_clock_var = tk.StringVar()
         self.keep_var = tk.BooleanVar(value=settings.keep_data_with_app)
         self.auto_refresh_var = tk.BooleanVar(value=settings.auto_refresh_enabled)
         self.fiat_minutes_var = tk.StringVar(value=str(settings.fiat_refresh_minutes))
@@ -2081,11 +2408,14 @@ class SettingsPage(tk.Frame):
         self.zone_display_to_name: dict[str, str] = {}
         self.zone_name_to_display: dict[str, str] = {}
         self.timezone_values = self._timezone_displays()
+        self.timezone_options_hour = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d%H")
         self.timezone_var.set(self.zone_name_to_display.get(settings.timezone, settings.timezone))
         self.theme_buttons: dict[str, AppButton] = {}
         self._build()
         self.refresh_cache_size()
-        self.timezone_job = self.after(1000, self._update_timezone_times)
+        self.timezone_job: str | None = None
+        self._update_timezone_time()
+        self.bind("<Destroy>", self._destroy_jobs, add="+")
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
@@ -2119,9 +2449,13 @@ class SettingsPage(tk.Frame):
             button.pack(side="left", expand=True, fill="x", padx=(0, 5) if value == "dark" else (5, 0), ipady=7)
             self.theme_buttons[value] = button
 
-        timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 当前年月日时分秒", 0, 1)
+        timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 0, 1)
         self.timezone_combo = SearchSelect(timezone_card, self.timezone_var, values=self.timezone_values, command=self._set_timezone, width=34, font_size=10, max_rows=8)
-        self.timezone_combo.pack(fill="x", padx=20, pady=(12, 18))
+        self.timezone_combo.pack(fill="x", padx=20, pady=(12, 7))
+        tk.Label(
+            timezone_card, textvariable=self.timezone_clock_var, bg=COLORS["card_alt"], fg=COLORS["accent"],
+            font=(FONT, 9, "bold"), padx=10, pady=6,
+        ).pack(fill="x", padx=20, pady=(0, 18))
 
         refresh_card = self._card(body, "自动刷新", "货币与虚拟币使用独立分钟间隔", 1, 0)
         self._check(refresh_card, "启用自动刷新", self.auto_refresh_var, "auto_refresh_enabled")
@@ -2259,15 +2593,15 @@ class SettingsPage(tk.Frame):
             label = "黑夜模式" if value == "dark" else "白天模式"
             button.configure(text=("●  " if selected else "○  ") + label, bg=COLORS["card"], fg=COLORS["accent"] if selected else COLORS["muted"], activebackground=COLORS["accent_dark"] if selected else COLORS["card_alt"], activeforeground=COLORS["accent"] if selected else COLORS["muted"], font=(FONT, 10, "bold" if selected else "normal"))
 
-    def _timezone_displays(self) -> list[str]:
-        now = datetime.now(ZoneInfo("UTC"))
+    def _timezone_displays(self, now: datetime | None = None) -> list[str]:
+        now = now or datetime.now(ZoneInfo("UTC"))
         display_to_name: dict[str, str] = {}
         name_to_display: dict[str, str] = {}
         values: list[str] = []
         for zone in self.zones:
             local = now.astimezone(self.zone_infos[zone])
             offset = local.strftime("%z") or "+0000"
-            display = f"UTC{offset[:3]}:{offset[3:]}  ·  {zone}  ·  {local:%Y年%m月%d日 %H:%M:%S}"
+            display = f"UTC{offset[:3]}:{offset[3:]}  ·  {zone}"
             display_to_name[display] = zone
             name_to_display[zone] = display
             values.append(display)
@@ -2275,19 +2609,37 @@ class SettingsPage(tk.Frame):
         self.zone_name_to_display = name_to_display
         return values
 
-    def _update_timezone_times(self) -> None:
-        focus = self.focus_get()
-        popup_open = self.timezone_combo.popup is not None and self.timezone_combo.popup.winfo_viewable()
-        if focus is not self.timezone_combo.entry and not popup_open:
-            values = self._timezone_displays()
-            self.timezone_combo.set_values(values)
-            self.timezone_combo.set(self.zone_name_to_display.get(self.settings.timezone, self.settings.timezone))
-        self.timezone_job = self.after(1000, self._update_timezone_times)
+    def _update_timezone_time(self) -> None:
+        self.timezone_job = None
+        utc_now = datetime.now(ZoneInfo("UTC"))
+        hour = utc_now.strftime("%Y%m%d%H")
+        if hour != self.timezone_options_hour:
+            focus = self.focus_get()
+            popup_open = self.timezone_combo.popup is not None and self.timezone_combo.popup.winfo_viewable()
+            if focus is not self.timezone_combo.entry and not popup_open:
+                self.timezone_values = self._timezone_displays(utc_now)
+                self.timezone_combo.set_values(self.timezone_values)
+                self.timezone_combo.set(self.zone_name_to_display.get(self.settings.timezone, self.settings.timezone))
+                self.timezone_options_hour = hour
+        zone = self.settings.timezone if self.settings.timezone in self.zone_infos else "UTC"
+        local = utc_now.astimezone(self.zone_infos.get(zone, ZoneInfo("UTC")))
+        self.timezone_clock_var.set(f"所选时区当前时间：{local:%Y年%m月%d日 %H:%M:%S}")
+        self.timezone_job = self.after(1000, self._update_timezone_time)
 
     def _set_timezone(self, display: str) -> None:
         zone = self.zone_display_to_name.get(display, display)
         if zone in self.zones:
             self.timezone_callback(zone)
+            local = datetime.now(self.zone_infos[zone])
+            self.timezone_clock_var.set(f"所选时区当前时间：{local:%Y年%m月%d日 %H:%M:%S}")
+
+    def _destroy_jobs(self, event: tk.Event) -> None:
+        if event.widget is self and self.timezone_job is not None:
+            try:
+                self.after_cancel(self.timezone_job)
+            except tk.TclError:
+                pass
+            self.timezone_job = None
 
     def _bind_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -2328,6 +2680,8 @@ class YaohengApp:
             self.root.geometry("1380x820")
         self.root.minsize(1240, 740)
         self.root.configure(bg=COLORS["bg"])
+        self.root.update_idletasks()
+        self._ensure_window_visible()
         self.app_icon_image: tk.PhotoImage | None = None
         icon_png = portable_dir() / "app.png"
         if icon_png.exists():
@@ -2350,12 +2704,17 @@ class YaohengApp:
         self.nav_buttons: dict[str, tk.Button] = {}
         self.current_page = "calculator"
         self.loading_rates = False
+        self.active_rate_section: str | None = None
+        self.pending_rate_section: str | None = None
         self.history_open = False
         self.history_width = 330
         self.last_network_at = ""
+        self.last_network_detail = ""
         self.auto_jobs: dict[str, str | None] = {"fiat": None, "crypto": None}
         self.geometry_job: str | None = None
         self.exiting = False
+        self.persistence_warning_shown = False
+        self.rate_results = TkResultBridge(self.root, self._finish_rates)
         self._styles()
         self._shell()
         start_page = self.settings.last_page if self.settings.remember_last_page else self.settings.startup_page
@@ -2405,6 +2764,31 @@ class YaohengApp:
         style.configure("Treeview.Heading", background=COLORS["card_alt"], foreground=COLORS["muted"], relief="flat", borderwidth=0, font=(FONT, 9, "bold"), padding=8)
         style.map("Treeview.Heading", background=[("active", COLORS["card_alt"])])
         style.configure("Vertical.TScrollbar", background=COLORS["key"], troughcolor=COLORS["card"], bordercolor=COLORS["card"], arrowcolor=COLORS["muted"])
+
+    def _ensure_window_visible(self) -> None:
+        try:
+            if sys.platform == "win32":
+                user32 = ctypes.windll.user32
+                bounds = (
+                    int(user32.GetSystemMetrics(76)),
+                    int(user32.GetSystemMetrics(77)),
+                    int(user32.GetSystemMetrics(78)),
+                    int(user32.GetSystemMetrics(79)),
+                )
+                if bounds[2] <= 0 or bounds[3] <= 0:
+                    bounds = (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+            else:
+                bounds = (
+                    self.root.winfo_vrootx(), self.root.winfo_vrooty(),
+                    self.root.winfo_vrootwidth(), self.root.winfo_vrootheight(),
+                )
+            width, height = self.root.winfo_width(), self.root.winfo_height()
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            adjusted_x, adjusted_y = visible_window_position(x, y, width, height, bounds)
+            if (adjusted_x, adjusted_y) != (x, y):
+                self.root.geometry(f"{width}x{height}{adjusted_x:+d}{adjusted_y:+d}")
+        except (AttributeError, OSError, tk.TclError):
+            return
 
     def _shell(self) -> None:
         self.root.grid_columnconfigure(1, weight=1)
@@ -2509,7 +2893,7 @@ class YaohengApp:
         try:
             stamp = datetime.fromisoformat(value)
             return stamp.astimezone(ZoneInfo(self.settings.timezone)).strftime("%Y年%m月%d日 %H:%M:%S")
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError, OverflowError, OSError):
             return "时间未知"
 
     def show_page(self, page: str) -> None:
@@ -2521,7 +2905,7 @@ class YaohengApp:
         self.current_page = page
         if self.settings.remember_last_page:
             self.settings.last_page = page
-            self.settings_store.save(self.settings)
+            self._persist_settings(notify=False)
         self.pages[page].tkraise()
         for key, button in self.nav_buttons.items():
             active = key == page
@@ -2544,8 +2928,14 @@ class YaohengApp:
         if self.loading_rates:
             if automatic and section in {"fiat", "crypto"}:
                 self._schedule_single_auto_refresh(section, 20_000)
+            elif not automatic and self.active_rate_section != "all" and section != self.active_rate_section:
+                if section == "all" or self.pending_rate_section not in {None, section}:
+                    self.pending_rate_section = "all"
+                else:
+                    self.pending_rate_section = section
             return
         self.loading_rates = True
+        self.active_rate_section = section
         self.network_button.configure(text="●  正在重新连接…", state="disabled")
         scope_text = "货币" if section == "fiat" else "虚拟币" if section == "crypto" else "汇率与行情"
         self._set_network_status(None, f"正在获取最新{scope_text}")
@@ -2571,30 +2961,38 @@ class YaohengApp:
         def worker() -> None:
             try:
                 snapshot = self.service.refresh(section)
-                self.root.after(0, lambda: self._finish_rates(snapshot, None, section))
+                self.rate_results.deliver(snapshot, None, section)
             except Exception as exc:
-                self.root.after(0, lambda message=str(exc): self._finish_rates(None, message, section))
+                self.rate_results.deliver(None, str(exc), section)
 
+        self.rate_results.expect()
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_rates(self, snapshot: RateSnapshot | None, error: str | None, section: str = "all") -> None:
+        if self.exiting:
+            return
         self.loading_rates = False
+        self.active_rate_section = None
         if snapshot:
             self.last_network_at = snapshot.fetched_at
-            self.apply_snapshot(snapshot, False, animated=True)
+            self.apply_snapshot(snapshot, False, animated=True, section=section)
             if snapshot.errors:
                 detail = "；".join(snapshot.errors[:2])
+                self.last_network_detail = f"部分更新 · {detail}"
                 self.network_button.configure(text="●  部分数据已更新  ↻", state="normal")
-                self._set_network_status("partial", f"{self.format_timestamp(snapshot.fetched_at)} 部分更新 · {detail}")
+                self._set_network_status("partial", f"{self.format_timestamp(snapshot.fetched_at)} {self.last_network_detail}")
             else:
+                self.last_network_detail = "已联网"
                 self.network_button.configure(text="●  汇率已联网  ↻", state="normal")
-                self._set_network_status(True, f"{self.format_timestamp(snapshot.fetched_at)} 已联网")
+                self._set_network_status(True, f"{self.format_timestamp(snapshot.fetched_at)} {self.last_network_detail}")
         else:
             now = datetime.now().astimezone().isoformat()
+            self.last_network_at = now
+            self.last_network_detail = "连接失败"
             self.network_button.configure(text="●  重新连接网络  ↻", state="normal")
-            self._set_network_status(False, f"{self.format_timestamp(now)} 连接失败")
+            self._set_network_status(False, f"{self.format_timestamp(now)} {self.last_network_detail}")
             if self.service.snapshot.rates:
-                self.apply_snapshot(self.service.snapshot, True, animated=True)
+                self.apply_snapshot(self.service.snapshot, True, animated=True, section=section)
             else:
                 page_keys = ("fiat", "fiat_market") if section == "fiat" else ("crypto", "market") if section == "crypto" else ("fiat", "fiat_market", "crypto", "market")
                 for key in page_keys:
@@ -2605,6 +3003,10 @@ class YaohengApp:
             self.schedule_auto_refresh()
         elif section in {"fiat", "crypto"}:
             self._schedule_single_auto_refresh(section)
+        pending = self.pending_rate_section
+        self.pending_rate_section = None
+        if pending:
+            self.refresh_rates(pending)
 
     def schedule_auto_refresh(self) -> None:
         for section, job in self.auto_jobs.items():
@@ -2649,10 +3051,22 @@ class YaohengApp:
         self.network_status.configure(text=text, bg=bg, fg=fg)
         self.network_time.configure(text=time_text)
 
-    def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False) -> None:
-        for key in ("fiat", "fiat_market", "crypto", "market"):
+    def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
+        keys = (
+            ("fiat", "fiat_market", "crypto", "market") if section == "fiat" else
+            ("crypto", "market") if section == "crypto" else
+            ("fiat", "fiat_market", "crypto", "market")
+        )
+        for key in keys:
             page = self.pages[key]
-            if hasattr(page, "apply_snapshot"):
+            if isinstance(page, MarketPage):
+                reload_chart = (
+                    section == "all"
+                    or (section == "fiat" and key == "fiat_market")
+                    or (section == "crypto" and key == "market")
+                )
+                page.apply_snapshot(snapshot, from_cache, animated, reload_chart=reload_chart)
+            elif hasattr(page, "apply_snapshot"):
                 page.apply_snapshot(snapshot, from_cache, animated)  # type: ignore[attr-defined]
 
     def toggle_history(self) -> None:
@@ -2691,11 +3105,21 @@ class YaohengApp:
             page.model.just_evaluated = False
             page.refresh_display()
 
+    def _persist_settings(self, notify: bool = True) -> bool:
+        saved = self.settings_store.save(self.settings)
+        if not saved and notify and not self.persistence_warning_shown:
+            self.persistence_warning_shown = True
+            messagebox.showerror(
+                "设置未保存",
+                "无法写入应用设置文件；本次更改仅在当前会话有效。请检查应用文件夹权限。",
+            )
+        return saved
+
     def save_setting(self, key: str, value: object) -> None:
         if key in AppSettings.__dataclass_fields__:
             setattr(self.settings, key, value)
         self.settings = self.settings_store.validate(self.settings)
-        self.settings_store.save(self.settings)
+        self._persist_settings()
         if key in {"auto_refresh_enabled", "fiat_refresh_minutes", "crypto_refresh_minutes", "refresh_when_minimized"}:
             self.schedule_auto_refresh()
         if key == "cache_limit_mb":
@@ -2714,7 +3138,7 @@ class YaohengApp:
                 self.refresh_history()
         if key == "retain_history" and not self.settings.retain_history:
             self.settings.calculator_history = []
-            self.settings_store.save(self.settings)
+            self._persist_settings()
 
     def save_currency_preferences(self, mode: str, favorites: list[str], pins: list[str]) -> None:
         if mode == "fiat":
@@ -2723,12 +3147,12 @@ class YaohengApp:
         else:
             self.settings.favorite_cryptos = favorites
             self.settings.pinned_cryptos = pins
-        self.settings_store.save(self.settings)
+        self._persist_settings()
 
     def calculator_mode_changed(self, mode: str) -> None:
         self.settings.last_calculator_mode = mode
         if self.settings.remember_calculator_mode:
-            self.settings_store.save(self.settings)
+            self._persist_settings(notify=False)
 
     def _queue_geometry_save(self, _event: tk.Event | None = None) -> None:
         if not self.settings.remember_window_geometry or self.history_open or self.root.state() != "normal":
@@ -2741,7 +3165,7 @@ class YaohengApp:
         self.geometry_job = None
         if self.settings.remember_window_geometry and not self.history_open and self.root.state() == "normal":
             self.settings.window_geometry = self.root.geometry()
-            self.settings_store.save(self.settings)
+            self._persist_settings(notify=False)
 
     def on_close_request(self) -> None:
         if self.settings.close_action == "minimize" and not self.exiting:
@@ -2761,10 +3185,25 @@ class YaohengApp:
             self.settings.calculator_history = [list(item) for item in page.model.history[:self.settings.history_limit]] if self.settings.retain_history else []
         if self.settings.remember_window_geometry and not self.history_open and self.root.state() == "normal":
             self.settings.window_geometry = self.root.geometry()
-        self.settings_store.save(self.settings)
+        self._persist_settings(notify=False)
+        self.rate_results.close()
+        self.loading_rates = False
+        self.active_rate_section = None
+        self.pending_rate_section = None
+        for attr in ("startup_job", "geometry_job"):
+            job = getattr(self, attr, None)
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
         for job in self.auto_jobs.values():
             if job:
-                self.root.after_cancel(job)
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
         self.root.destroy()
 
     def clear_cache(self) -> None:
@@ -2780,8 +3219,9 @@ class YaohengApp:
         target = filedialog.asksaveasfilename(title="导出曜衡设置", defaultextension=".json", filetypes=[("JSON 设置", "*.json")], initialfile="曜衡设置.json")
         if not target:
             return
-        self.settings_store.save(self.settings)
         try:
+            if not self.settings_store.save(self.settings):
+                raise OSError("当前设置无法写入应用文件夹")
             shutil.copy2(self.settings_store.path, Path(target))
             messagebox.showinfo("导出完成", f"设置已导出到：\n{target}")
         except OSError as exc:
@@ -2792,19 +3232,20 @@ class YaohengApp:
         if not source:
             return
         try:
-            payload = json.loads(Path(source).read_text(encoding="utf-8"))
-            known = {key: payload[key] for key in AppSettings.__dataclass_fields__ if key in payload}
-            imported = self.settings_store.validate(AppSettings(**known))
-            self.settings_store.save(imported)
+            imported = self.settings_store.from_file(Path(source))
+            if not self.settings_store.save(imported):
+                raise OSError("应用设置文件不可写")
             messagebox.showinfo("导入完成", "设置已导入，重新启动曜衡后全部生效。")
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
             messagebox.showerror("导入失败", f"该文件不是有效的曜衡设置：\n{exc}")
 
     def reset_settings(self) -> None:
         if not messagebox.askyesno("恢复默认设置", "确定恢复所有默认设置吗？\n收藏、置顶和计算历史也会重置。"):
             return
-        self.settings_store.save(AppSettings())
-        messagebox.showinfo("已恢复默认设置", "默认设置已写入，重新启动曜衡后全部生效。")
+        if self.settings_store.save(AppSettings()):
+            messagebox.showinfo("已恢复默认设置", "默认设置已写入，重新启动曜衡后全部生效。")
+        else:
+            messagebox.showerror("恢复失败", "应用设置文件不可写，请检查应用文件夹权限。")
 
     @staticmethod
     def open_folder(path: Path) -> None:
@@ -2819,7 +3260,7 @@ class YaohengApp:
             return
         old = dict(COLORS)
         self.settings.theme = theme
-        self.settings_store.save(self.settings)
+        self._persist_settings()
         COLORS.clear()
         COLORS.update(THEMES[theme])
         keys_by_color: dict[str, list[str]] = {}
@@ -2894,21 +3335,41 @@ class YaohengApp:
     def set_timezone(self, zone: str) -> None:
         try:
             ZoneInfo(zone)
-        except KeyError:
+        except (KeyError, ValueError):
             return
         self.settings.timezone = zone
-        self.settings_store.save(self.settings)
+        self._persist_settings()
         if self.service.snapshot.fetched_at:
-            self.apply_snapshot(self.service.snapshot, True)
+            stamp = f"最新刷新：{self.format_timestamp(self.service.snapshot.fetched_at)}"
+            for key in ("fiat", "fiat_market", "crypto", "market"):
+                page = self.pages.get(key)
+                refresh_stamp = getattr(page, "refresh_stamp_var", None)
+                if refresh_stamp is not None:
+                    refresh_stamp.set(stamp)
         if self.last_network_at:
-            self._set_network_status(True, f"{self.format_timestamp(self.last_network_at)} 已联网")
+            self.network_time.configure(
+                text=f"{self.format_timestamp(self.last_network_at)} {self.last_network_detail}"
+            )
 
     def set_keep_data_with_app(self, keep: bool) -> None:
+        previous_keep = self.settings.keep_data_with_app
+        previous_data_dir = self.settings.data_dir
+        if not keep and not previous_data_dir:
+            self.choose_data_directory()
+            settings_page = self.pages.get("settings")
+            if isinstance(settings_page, SettingsPage):
+                settings_page.update_paths(self.settings)
+            return
         self.settings.keep_data_with_app = keep
         if keep:
             self.settings.data_dir = ""
+        if not self._persist_settings():
+            self.settings.keep_data_with_app = previous_keep
+            self.settings.data_dir = previous_data_dir
+        elif keep:
             self._switch_data_dir(portable_dir() / "data")
-        self.settings_store.save(self.settings)
+        else:
+            self._switch_data_dir(self.settings.resolved_data_dir())
         settings_page = self.pages.get("settings")
         if isinstance(settings_page, SettingsPage):
             settings_page.update_paths(self.settings)
@@ -2926,9 +3387,14 @@ class YaohengApp:
             target.mkdir(parents=True, exist_ok=True)
             if current.exists() and current != target:
                 shutil.copytree(current, target, dirs_exist_ok=True)
+            previous_keep = self.settings.keep_data_with_app
+            previous_data_dir = self.settings.data_dir
             self.settings.keep_data_with_app = False
             self.settings.data_dir = str(target)
-            self.settings_store.save(self.settings)
+            if not self._persist_settings():
+                self.settings.keep_data_with_app = previous_keep
+                self.settings.data_dir = previous_data_dir
+                return
             self._switch_data_dir(target)
             settings_page = self.pages.get("settings")
             if isinstance(settings_page, SettingsPage):
@@ -2959,33 +3425,46 @@ class YaohengApp:
             shutil.copytree(source, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns("build", "__pycache__"))
             if not self.settings.keep_data_with_app and self.service.data_dir.exists():
                 shutil.copytree(self.service.data_dir, target / "data", dirs_exist_ok=True)
-            copied_payload = dict(self.settings.__dict__)
-            copied_payload.update({"data_dir": "", "keep_data_with_app": True})
-            (target / "app_settings.json").write_text(json.dumps(copied_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            copied_settings = AppSettings(**dict(self.settings.__dict__))
+            copied_settings.data_dir = ""
+            copied_settings.keep_data_with_app = True
+            if not SettingsStore(target / "app_settings.json").save(copied_settings):
+                raise OSError("无法在迁移位置写入设置")
             messagebox.showinfo("迁移完成", f"曜衡及相关数据已复制到：\n{target}\n\n关闭当前程序后，可从新文件夹启动。原文件仍保留。")
         except OSError as exc:
             messagebox.showerror("迁移失败", str(exc))
 
-    def on_key(self, event: tk.Event) -> None:
+    @staticmethod
+    def _calculator_key(event: tk.Event) -> str | None:
+        if int(getattr(event, "state", 0)) & 0x000C:
+            return None
+        keysym = str(getattr(event, "keysym", ""))
+        by_keysym = {
+            "KP_Add": "+", "KP_Subtract": "−", "KP_Multiply": "×", "KP_Divide": "÷",
+            "KP_Decimal": ".", "KP_Separator": ".", "Return": "=", "KP_Enter": "=",
+            "BackSpace": "←", "Delete": "AC", "Escape": "AC",
+        }
+        if keysym in by_keysym:
+            return by_keysym[keysym]
+        char = str(getattr(event, "char", ""))
+        char = char.translate(str.maketrans("０１２３４５６７８９＋－＊／％（）．", "0123456789+-*/%()."))
+        if char in "0123456789":
+            return char
+        return {"+": "+", "-": "−", "*": "×", "/": "÷", "%": "%", "^": "xʸ", ".": ".", "(": "(", ")": ")", "=": "="}.get(char)
+
+    def on_key(self, event: tk.Event) -> str | None:
         if self.current_page != "calculator":
-            return
-        if isinstance(self.root.focus_get(), (tk.Entry, ttk.Combobox)):
-            return
+            return None
+        if isinstance(self.root.focus_get(), (tk.Entry, tk.Text, tk.Spinbox, ttk.Combobox)):
+            return None
         page = self.pages["calculator"]
         if not isinstance(page, CalculatorPage):
-            return
-        char = event.char
-        mapping = {"+": "+", "-": "−", "*": "×", "/": "÷", "%": "%", "^": "xʸ", ".": ".", "(": "(", ")": ")"}
-        if char.isdigit():
-            page.handle(char)
-        elif char in mapping:
-            page.handle(mapping[char])
-        elif event.keysym in {"Return", "KP_Enter"}:
-            page.handle("=")
-        elif event.keysym == "BackSpace":
-            page.handle("←")
-        elif event.keysym in {"Delete", "Escape"}:
-            page.handle("AC")
+            return None
+        key = self._calculator_key(event)
+        if key is None:
+            return None
+        page.handle(key)
+        return "break"
 
     def run(self) -> None:
         self.root.mainloop()
