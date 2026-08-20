@@ -1,6 +1,7 @@
 -r requirements.txt
 
-# Build-only dependency lock for Windows packaging and icon generation.
+# Complete build-only dependency lock for Windows packaging and icon generation.
+# The runtime lock above and every build transitive dependency are explicit.
 altgraph==0.17.5
 packaging==26.3
 pefile==2024.8.26

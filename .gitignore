@@ -11,9 +11,10 @@ build/
 dist/
 release/
 
-# 运行时缓存（程序会自动重新生成）
-data/*.json
+# 运行时缓存与设置（可能包含历史记录、自定义路径和收藏）
+/data/
 /app_settings.json
+/app_settings.json.bak
 *.tmp
 
 # 编辑器与系统文件

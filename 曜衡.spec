@@ -17,7 +17,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # These build-tool and optional compatibility modules are not used by the
+    # application. Excluding them reduces package size and attack surface.
+    excludes=['distutils', 'pip', 'pkg_resources', 'setuptools', 'unittest'],
     noarchive=False,
     optimize=0,
 )

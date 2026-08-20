@@ -34,6 +34,13 @@
 
 > 当前安装包未使用商业代码签名证书。Windows SmartScreen 可能在首次运行时显示未知发布者提示，请只从本仓库 Release 页面下载，并核对 Release 中公布的 SHA-256。
 
+每次正式构建会生成 `SHA256SUMS.txt`。下载后可用 PowerShell 计算文件摘要，并与清单中的同名文件核对：
+
+```powershell
+Get-FileHash -Algorithm SHA256 ".\曜衡-<版本>-Windows-x64-安装版.exe"
+Get-FileHash -Algorithm SHA256 ".\曜衡-绿色免安装版.zip"
+```
+
 ## 功能亮点
 
 | 模块 | 能力 |
@@ -57,7 +64,7 @@
 
 ## 数据、隐私与风险提示
 
-- 默认设置与缓存位于应用目录；也可在设置页迁移数据目录、导入或导出设置。
+- 默认设置与缓存位于应用目录；也可在设置页迁移数据目录、导入或导出设置。卸载器只会按用户确认删除应用目录内的数据，不会删除自定义数据目录。
 - 发布包不会包含开发电脑上的设置、历史记录、收藏、缓存或自定义路径。
 - 法币汇率来自 ExchangeRate-API，法币历史趋势来自 Frankfurter；虚拟币行情主要来自 Binance，并使用 CoinGecko 作为补充或备用。
 - 外部数据源可能延迟、中断或调整接口。曜衡会校验响应并尽量回退到最后可信数据，但不保证行情的实时性、完整性或结算准确性。
@@ -72,7 +79,7 @@ git clone https://github.com/alokxfox/yaoheng.git
 cd yaoheng
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --disable-pip-version-check -r requirements.txt
+python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: -r requirements.txt
 python main.py
 ```
 
@@ -84,20 +91,24 @@ python main.py
 python -B -m unittest discover -s tests -v
 ```
 
-构建完整 Windows 发行包需要 Python 3.11+ 与 Inno Setup 6：
+构建完整 Windows 发行包需要 Python 3.13.15+ 与 Inno Setup 6。构建脚本还会检查 Python 捆绑的 OpenSSL 是否达到当前安全修复基线，避免把过期原生运行时带入安装包：
 
 ```powershell
+winget install --id Python.Python.3.13 -e
 winget install --id JRSoftware.InnoSetup -e
 .\build.ps1
 ```
 
-构建脚本会在隔离环境中安装锁定依赖、检查语法、运行全部测试，然后生成：
+如需使用未加入 `PATH` 的隔离 Python，可将其绝对路径放入 `$env:YAO_HENG_PYTHON` 后再运行构建脚本。
+
+构建脚本会在隔离环境中安装完整锁定的依赖、拒绝隐式依赖和源码包、检查语法、运行全部测试，并对暂存目录和压缩包执行内容一致性与隐私扫描，然后生成：
 
 - `release\曜衡\曜衡.exe`：本机可直接运行的文件夹版；
 - `release\曜衡-绿色免安装版.zip`：不含本机隐私数据的绿色版；
 - `release\曜衡-<版本>-Windows-x64-安装版.exe`：当前用户安装包。
+- `release\SHA256SUMS.txt`：上述可发布 ZIP 与安装器的 SHA-256 清单。
 
-安装器使用 Inno Setup 的稳定版工具链构建。简体中文安装界面采用项目内固定版本的第三方翻译，来源与许可证见 `installer/THIRD-PARTY-NOTICES.txt`。
+安装器使用 Inno Setup 的稳定版工具链构建。简体中文安装界面采用项目内固定版本的第三方翻译，来源与许可证见 `installer/THIRD-PARTY-NOTICES.txt`；成品中的 `licenses/` 目录包含实际捆绑的 Python、OpenSSL、Tcl/Tk 与 Python 依赖许可证文本。
 
 ## 项目结构
 

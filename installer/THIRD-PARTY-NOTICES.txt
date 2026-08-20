@@ -1,5 +1,13 @@
-Chinese Simplified translation for Inno Setup
+Third-party notices
 ================================================
+
+The portable package and installed application include exact license texts for
+the bundled Python runtime, Python dependencies, PyInstaller bootloader,
+OpenSSL, and Tcl/Tk under the "licenses" directory. This notice covers the
+vendored Inno Setup translation used to build the installer interface.
+
+Chinese Simplified translation for Inno Setup
+------------------------------------------------
 
 Source:
 https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation

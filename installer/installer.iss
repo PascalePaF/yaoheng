@@ -52,7 +52,6 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\曜衡\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
@@ -62,8 +61,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [CustomMessages]
-chinesesimplified.RemoveUserDataPrompt=是否同时删除曜衡的本机设置、计算历史与行情缓存？%n%n选择“否”可保留这些数据，方便以后重新安装。
-english.RemoveUserDataPrompt=Also remove local settings, calculation history, and market cache?%n%nChoose No to preserve this data for a future installation.
+chinesesimplified.RemoveUserDataPrompt=是否同时删除曜衡应用目录内的本机设置、计算历史与行情缓存？%n%n选择“否”可保留这些数据，方便以后重新安装。自定义数据目录不会由卸载程序删除。
+english.RemoveUserDataPrompt=Also remove local settings, calculation history, and market cache stored inside the application directory?%n%nChoose No to preserve this data for a future installation. The uninstaller never deletes a custom data directory.
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

@@ -3,6 +3,7 @@ $ProjectDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.My
 $AppName = -join @([char]26332, [char]34913)
 $AppVersion = "3.16"
 $GuideName = (-join @([char]20351, [char]29992, [char]35828, [char]26126)) + ".txt"
+$ThirdPartyNoticeName = "THIRD-PARTY-NOTICES.txt"
 $PathSeparators = [char[]]@(
     [System.IO.Path]::DirectorySeparatorChar,
     [System.IO.Path]::AltDirectorySeparatorChar
@@ -87,9 +88,18 @@ function Find-InnoCompiler {
     throw "Inno Setup 6 was not found. Install JRSoftware.InnoSetup with winget, or set YAO_HENG_ISCC to ISCC.exe."
 }
 
-$PythonCommand = Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1
-$BootstrapPythonPath = $PythonCommand.Source
+if ($env:YAO_HENG_PYTHON) {
+    if (-not (Test-Path -LiteralPath $env:YAO_HENG_PYTHON -PathType Leaf)) {
+        throw "YAO_HENG_PYTHON does not point to a Python executable: $($env:YAO_HENG_PYTHON)"
+    }
+    $BootstrapPythonPath = [System.IO.Path]::GetFullPath($env:YAO_HENG_PYTHON)
+}
+else {
+    $PythonCommand = Get-Command python -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $BootstrapPythonPath = $PythonCommand.Source
+}
 $PythonPath = $BootstrapPythonPath
+$PythonLicensePath = Join-Path (Split-Path -Parent $BootstrapPythonPath) "LICENSE.txt"
 $DistRoot = Assert-SafeChildPath -Path (Join-Path $ProjectDir "dist") -AllowedRoot $ProjectDir
 $BuildRoot = Assert-SafeChildPath -Path (Join-Path $ProjectDir "build") -AllowedRoot $ProjectDir
 $BuildEnvRoot = Assert-SafeChildPath -Path (Join-Path $ProjectDir ".venv-build") -AllowedRoot $ProjectDir
@@ -101,17 +111,29 @@ $ZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($AppName + "-绿�
 $InstallerScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "installer\installer.iss") -AllowedRoot $ProjectDir
 $InstallerBaseName = $AppName + "-" + $AppVersion + "-Windows-x64-安装版"
 $InstallerPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($InstallerBaseName + ".exe")) -AllowedRoot $ReleaseRoot
+$ChecksumManifestPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot "SHA256SUMS.txt") -AllowedRoot $ReleaseRoot
+$ReleaseChecksScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "tools\release_checks.py") -AllowedRoot $ProjectDir
+$PrivacyStrings = @($ProjectDir)
+if ($env:USERPROFILE) {
+    $PrivacyStrings += [System.IO.Path]::GetFullPath($env:USERPROFILE)
+}
 
 Push-Location -LiteralPath $ProjectDir
 try {
-    Write-Host "[1/10] Checking build prerequisites..."
+    Write-Host "[1/12] Checking build prerequisites..."
     Invoke-Python -PythonArguments @(
         "-c",
-        "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 'Python 3.11 or newer is required')"
-    ) -FailureMessage "Python version check failed"
+        "import ssl, sys; py=sys.version_info[:3]; openssl=ssl.OPENSSL_VERSION_INFO[:3]; floors={(3,0):(3,0,21),(3,4):(3,4,6),(3,5):(3,5,7),(3,6):(3,6,3),(4,0):(4,0,1)}; floor=floors.get(openssl[:2]); sys.exit(f'Python 3.13.15 or newer is required for release builds (found {py})') if py < (3,13,15) else None; sys.exit(f'The bundled OpenSSL branch/version is not approved for release builds: {ssl.OPENSSL_VERSION}') if floor is None or openssl < floor else None; print(f'Release runtime: Python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}')"
+    ) -FailureMessage "Release runtime security check failed"
     $InnoCompilerPath = Find-InnoCompiler
     if (-not (Test-Path -LiteralPath $InstallerScript -PathType Leaf)) {
         throw "Installer script was not found: $InstallerScript"
+    }
+    if (-not (Test-Path -LiteralPath $ReleaseChecksScript -PathType Leaf)) {
+        throw "Release checks script was not found: $ReleaseChecksScript"
+    }
+    if (-not (Test-Path -LiteralPath $PythonLicensePath -PathType Leaf)) {
+        throw "Python license file was not found: $PythonLicensePath"
     }
     $RunningPortableProcesses = @(
         Get-Process -Name $AppName -ErrorAction SilentlyContinue | Where-Object {
@@ -131,7 +153,16 @@ try {
         throw "Close the running portable application before building (process ID: $ProcessIds): $PortableExecutable"
     }
 
-    Write-Host "[2/10] Preparing an isolated build environment..."
+    # Remove only the known publishable assets up front. If a later step fails,
+    # stale binaries cannot be mistaken for output from the failed build.
+    foreach ($PublishablePath in @($ZipPath, $InstallerPath, $ChecksumManifestPath)) {
+        $null = Assert-SafeChildPath -Path $PublishablePath -AllowedRoot $ReleaseRoot
+        if (Test-Path -LiteralPath $PublishablePath) {
+            Remove-Item -LiteralPath $PublishablePath -Force
+        }
+    }
+
+    Write-Host "[2/12] Preparing an isolated build environment..."
     if (Test-Path -LiteralPath $BuildEnvRoot) {
         $null = Assert-SafeChildPath -Path $BuildEnvRoot -AllowedRoot $ProjectDir
     }
@@ -144,14 +175,15 @@ try {
         throw "The isolated build environment did not create Python: $PythonPath"
     }
 
-    Write-Host "[3/10] Installing locked build dependencies..."
+    Write-Host "[3/12] Installing locked build dependencies..."
     Invoke-Python -PythonArguments @(
         "-m", "pip", "install", "--disable-pip-version-check",
+        "--no-deps", "--only-binary=:all:",
         "--requirement", (Join-Path $ProjectDir "requirements-build.txt")
     ) -FailureMessage "Dependency installation failed"
     Invoke-Python -PythonArguments @("-m", "pip", "check") -FailureMessage "Dependency verification failed"
 
-    Write-Host "[4/10] Checking Python syntax..."
+    Write-Host "[4/12] Checking Python syntax..."
     $PythonFiles = @(
         "main.py",
         "app_ui.py",
@@ -159,17 +191,18 @@ try {
         "rate_service.py",
         "settings_service.py",
         "make_icon.py",
+        "tools",
         "tests"
     ) | ForEach-Object { Join-Path $ProjectDir $_ }
     Invoke-Python -PythonArguments (@("-B", "-m", "compileall", "-q", "-f") + $PythonFiles) -FailureMessage "Python syntax check failed"
 
-    Write-Host "[5/10] Running automated tests..."
+    Write-Host "[5/12] Running automated tests..."
     Invoke-Python -PythonArguments @("-B", "-m", "unittest", "discover", "-s", "tests", "-v") -FailureMessage "Automated tests failed"
 
-    Write-Host "[6/10] Creating application icon..."
+    Write-Host "[6/12] Creating application icon..."
     Invoke-Python -PythonArguments @((Join-Path $ProjectDir "make_icon.py")) -FailureMessage "Icon generation failed"
 
-    Write-Host "[7/10] Building portable executable..."
+    Write-Host "[7/12] Building portable executable..."
     foreach ($GeneratedPath in @($BuildRoot, $StagedPortableDir)) {
         if (Test-Path -LiteralPath $GeneratedPath) {
             # Assert again immediately before deletion in case the path changed.
@@ -201,17 +234,37 @@ try {
     Copy-Item -LiteralPath (Join-Path $ProjectDir $GuideName) -Destination (Join-Path $StagedPortableDir $GuideName) -Force
     Copy-Item -LiteralPath (Join-Path $ProjectDir "app.ico") -Destination (Join-Path $StagedPortableDir "app.ico") -Force
     Copy-Item -LiteralPath (Join-Path $ProjectDir "app.png") -Destination (Join-Path $StagedPortableDir "app.png") -Force
+    Copy-Item -LiteralPath (Join-Path $ProjectDir "installer\$ThirdPartyNoticeName") -Destination (Join-Path $StagedPortableDir $ThirdPartyNoticeName) -Force
 
-    # The distributable must come only from clean staging output. Fail closed if
-    # a future packaging change introduces local settings or the runtime cache.
-    foreach ($PrivateName in @("app_settings.json", "data")) {
-        $PrivatePath = Join-Path $StagedPortableDir $PrivateName
-        if (Test-Path -LiteralPath $PrivatePath) {
-            throw "Refusing to package private runtime data: $PrivatePath"
-        }
+    Write-Host "[8/12] Collecting licenses and auditing staged files..."
+    $LicenseArguments = @(
+        $ReleaseChecksScript, "collect-licenses",
+        "--staging", $StagedPortableDir,
+        "--python-license", $PythonLicensePath
+    )
+    foreach ($Distribution in @(
+        "certifi==2026.7.22",
+        "charset-normalizer==3.5.1",
+        "idna==3.19",
+        "requests==2.34.2",
+        "tzdata==2026.3",
+        "urllib3==2.7.0",
+        "pyinstaller==6.22.2"
+    )) {
+        $LicenseArguments += @("--distribution", $Distribution)
     }
+    Invoke-Python -PythonArguments $LicenseArguments -FailureMessage "Third-party license collection failed"
+    $StagingAuditArguments = @(
+        $ReleaseChecksScript, "verify-staging",
+        "--root", $StagedPortableDir,
+        "--app-name", $AppName
+    )
+    foreach ($PrivateString in $PrivacyStrings) {
+        $StagingAuditArguments += @("--forbid-string", $PrivateString)
+    }
+    Invoke-Python -PythonArguments $StagingAuditArguments -FailureMessage "Staged release audit failed"
 
-    Write-Host "[8/10] Updating local portable copy..."
+    Write-Host "[9/12] Updating local portable copy..."
     $ReleaseRoot = Assert-SafeChildPath -Path $ReleaseRoot -AllowedRoot $ProjectDir
     [System.IO.Directory]::CreateDirectory($ReleaseRoot) | Out-Null
     $PortableDir = Assert-SafeChildPath -Path $PortableDir -AllowedRoot $ReleaseRoot
@@ -221,7 +274,10 @@ try {
     # Replace only known generated items. User settings, cached data and any
     # unrelated files in the portable directory remain untouched. Replacing the
     # entire _internal tree prevents stale bundled libraries from surviving.
-    $GeneratedItems = @($AppName + ".exe", "_internal", $GuideName, "app.ico", "app.png")
+    $GeneratedItems = @(
+        $AppName + ".exe", "_internal", $GuideName, "app.ico", "app.png",
+        $ThirdPartyNoticeName, "licenses"
+    )
     foreach ($GeneratedItem in $GeneratedItems) {
         $GeneratedPath = Assert-SafeChildPath -Path (Join-Path $PortableDir $GeneratedItem) -AllowedRoot $PortableDir
         if (Test-Path -LiteralPath $GeneratedPath) {
@@ -232,11 +288,17 @@ try {
         Copy-Item -LiteralPath $_.FullName -Destination $PortableDir -Recurse -Force
     }
 
-    Write-Host "[9/10] Creating privacy-safe portable ZIP..."
+    Write-Host "[10/12] Creating and verifying the portable ZIP..."
     $ZipPath = Assert-SafeChildPath -Path $ZipPath -AllowedRoot $ReleaseRoot
     Compress-Archive -LiteralPath $StagedPortableDir -DestinationPath $ZipPath -CompressionLevel Optimal -Force
+    Invoke-Python -PythonArguments @(
+        $ReleaseChecksScript, "verify-zip",
+        "--zip", $ZipPath,
+        "--staging", $StagedPortableDir,
+        "--app-name", $AppName
+    ) -FailureMessage "Portable ZIP verification failed"
 
-    Write-Host "[10/10] Building Windows installer..."
+    Write-Host "[11/12] Building and auditing the Windows installer..."
     $InstallerPath = Assert-SafeChildPath -Path $InstallerPath -AllowedRoot $ReleaseRoot
     if (Test-Path -LiteralPath $InstallerPath) {
         Remove-Item -LiteralPath $InstallerPath -Force
@@ -248,11 +310,28 @@ try {
     if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
         throw "Inno Setup did not create the expected installer: $InstallerPath"
     }
+    $InstallerAuditArguments = @(
+        $ReleaseChecksScript, "verify-binary",
+        "--path", $InstallerPath
+    )
+    foreach ($PrivateString in $PrivacyStrings) {
+        $InstallerAuditArguments += @("--forbid-string", $PrivateString)
+    }
+    Invoke-Python -PythonArguments $InstallerAuditArguments -FailureMessage "Installer privacy audit failed"
+
+    Write-Host "[12/12] Writing SHA-256 checksums..."
+    Invoke-Python -PythonArguments @(
+        $ReleaseChecksScript, "checksums",
+        "--output", $ChecksumManifestPath,
+        "--asset", $InstallerPath,
+        "--asset", $ZipPath
+    ) -FailureMessage "SHA-256 manifest generation failed"
 
     Write-Host ""
     Write-Host "Build complete: $(Join-Path $PortableDir ($AppName + '.exe'))" -ForegroundColor Green
     Write-Host "Portable ZIP:  $ZipPath" -ForegroundColor Green
     Write-Host "Installer:     $InstallerPath" -ForegroundColor Green
+    Write-Host "SHA-256:       $ChecksumManifestPath" -ForegroundColor Green
 }
 finally {
     Pop-Location
