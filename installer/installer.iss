@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.17"
+  #define AppVersion "3.18"
 #endif
 
 #define AppName "曜衡"
@@ -61,8 +61,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent
 
 [CustomMessages]
-chinesesimplified.RemoveUserDataPrompt=是否同时删除曜衡应用目录内的本机设置、计算历史与行情缓存？%n%n选择“否”可保留这些数据，方便以后重新安装。自定义数据目录不会由卸载程序删除。
-english.RemoveUserDataPrompt=Also remove local settings, calculation history, and market cache stored inside the application directory?%n%nChoose No to preserve this data for a future installation. The uninstaller never deletes a custom data directory.
+chinesesimplified.RemoveUserDataPrompt=是否同时删除曜衡应用目录内的本机设置、计算历史、行情缓存与本机 API 令牌？%n%n选择“否”可保留这些数据，方便以后重新安装。自定义数据目录不会由卸载程序删除。
+english.RemoveUserDataPrompt=Also remove local settings, calculation history, market cache, and the local API token stored inside the application directory?%n%nChoose No to preserve this data for a future installation. The uninstaller never deletes a custom data directory.
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -77,6 +77,8 @@ begin
     begin
       DeleteFile(ExpandConstant('{app}\app_settings.json'));
       DeleteFile(ExpandConstant('{app}\app_settings.json.bak'));
+      DeleteFile(ExpandConstant('{app}\app_settings.pre-v2.json'));
+      DelTree(ExpandConstant('{app}\private'), True, True, True);
       DelTree(ExpandConstant('{app}\data'), True, True, True);
     end;
   end;

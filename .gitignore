@@ -15,6 +15,8 @@ release/
 /data/
 /app_settings.json
 /app_settings.json.bak
+/app_settings.pre-v2.json
+/private/
 *.tmp
 
 # 编辑器与系统文件

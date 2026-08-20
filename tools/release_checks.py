@@ -24,9 +24,14 @@ _PRIVATE_TOP_LEVEL_NAMES = {
     "app_settings.json",
     "app_settings.json.bak",
     "data",
+    "private",
 }
 _PRIVATE_FILE_PATTERNS = (
-    re.compile(r"^app_settings\.json(?:\.bak)?$", re.IGNORECASE),
+    re.compile(
+        r"^\.?app_settings(?:\.json|\.pre-v2\.json)(?:\..+)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^\.?local_api_token\.json(?:\..+)?$", re.IGNORECASE),
     re.compile(r"^rates_cache\.json$", re.IGNORECASE),
     re.compile(r"^(?:fiat_)?chart_.+\.json$", re.IGNORECASE),
     re.compile(r"^\.env(?:\..+)?$", re.IGNORECASE),
@@ -364,7 +369,7 @@ def write_checksums(output: Path, assets: Iterable[Path]) -> None:
     asset_paths = [path.resolve() for path in assets]
     if not asset_paths:
         raise ReleaseCheckError("no release assets were supplied for checksums")
-    validate_release_asset_names(path.name for path in asset_paths)
+    validate_release_asset_names([output.name, *(path.name for path in asset_paths)])
     names: set[str] = set()
     lines: list[str] = []
     for path in sorted(asset_paths, key=lambda item: item.name.casefold()):

@@ -3,6 +3,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from app_version import APP_VERSION
 from tools.release_checks import (
     ReleaseCheckError,
     validate_release_asset_names,
@@ -50,6 +51,27 @@ class ReleaseChecksTests(unittest.TestCase):
             with self.assertRaisesRegex(ReleaseCheckError, "private (?:top-level path|runtime file)"):
                 verify_staging(staging, "曜衡")
 
+    def test_local_api_verifiers_and_settings_migration_files_are_rejected(self):
+        private_variants = (
+            Path("private/local_api_token.json"),
+            Path("local_api_token.json.bak"),
+            Path(".local_api_token.json.random.tmp"),
+            Path("app_settings.pre-v2.json"),
+            Path(".app_settings.json.random.tmp"),
+        )
+        for relative in private_variants:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                staging = self.make_staging(Path(directory))
+                target = staging / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("private fixture", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    ReleaseCheckError,
+                    "private (?:top-level path|runtime file)",
+                ):
+                    verify_staging(staging, "曜衡")
+
     def test_build_machine_paths_and_secret_tokens_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             staging = self.make_staging(Path(directory))
@@ -89,15 +111,25 @@ class ReleaseChecksTests(unittest.TestCase):
             self.assertEqual([line.split("  ", 1)[1] for line in lines], ["a.exe", "b.zip"])
             self.assertTrue(all(len(line.split("  ", 1)[0]) == 64 for line in lines))
 
+    def test_checksum_manifest_name_must_also_be_stable_ascii(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            asset = root / f"Yaoheng-{APP_VERSION}-Windows-x64-Setup.exe"
+            asset.write_bytes(b"fixture")
+
+            with self.assertRaisesRegex(ReleaseCheckError, "ASCII"):
+                write_checksums(root / "校验和.txt", [asset])
+
     def test_release_asset_names_are_stable_ascii(self):
         expected = [
-            "Yaoheng-3.17-Windows-x64-Setup.exe",
-            "Yaoheng-3.17-Windows-x64-Portable.zip",
+            f"Yaoheng-{APP_VERSION}-Windows-x64-Setup.exe",
+            f"Yaoheng-{APP_VERSION}-Windows-x64-Portable.zip",
+            "SHA256SUMS.txt",
         ]
         validate_release_asset_names(expected)
 
         for unsafe in (
-            "曜衡-3.17-Windows-x64-安装版.exe",
+            f"曜衡-{APP_VERSION}-Windows-x64-安装版.exe",
             "nested/Yaoheng.zip",
             "Yaoheng Portable.zip",
         ):
@@ -126,6 +158,20 @@ class ReleaseChecksTests(unittest.TestCase):
             "OutputBaseFilename=Yaoheng-{#AppVersion}-Windows-x64-Setup",
             installer_script,
         )
+        self.assertIn(f'$AppVersion = "{APP_VERSION}"', build_script)
+        self.assertIn(f'#define AppVersion "{APP_VERSION}"', installer_script)
+        for source in (
+            "app_version.py",
+            "conversion_core.py",
+            "exchange_page.py",
+            "command_service.py",
+            "local_api.py",
+            "secret_store.py",
+            "c2c",
+        ):
+            with self.subTest(source=source):
+                self.assertIn(f'"{source}"', build_script)
+        self.assertIn("DelTree(ExpandConstant('{app}\\private')", installer_script)
 
     def test_release_runtime_parses_openssl_patch_field_correctly(self):
         validate_release_runtime(

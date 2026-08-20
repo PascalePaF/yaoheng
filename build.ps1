@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $ProjectDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $AppName = -join @([char]26332, [char]34913)
-$AppVersion = "3.17"
+$AppVersion = "3.18"
 $ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion
 $GuideName = (-join @([char]20351, [char]29992, [char]35828, [char]26126)) + ".txt"
 $ThirdPartyNoticeName = "THIRD-PARTY-NOTICES.txt"
@@ -141,7 +141,8 @@ try {
     Invoke-Python -PythonArguments @(
         $ReleaseChecksScript, "validate-asset-names",
         "--asset-name", ([System.IO.Path]::GetFileName($InstallerPath)),
-        "--asset-name", ([System.IO.Path]::GetFileName($ZipPath))
+        "--asset-name", ([System.IO.Path]::GetFileName($ZipPath)),
+        "--asset-name", ([System.IO.Path]::GetFileName($ChecksumManifestPath))
     ) -FailureMessage "Release asset name validation failed"
     $RunningPortableProcesses = @(
         Get-Process -Name $AppName -ErrorAction SilentlyContinue | Where-Object {
@@ -202,10 +203,17 @@ try {
     Write-Host "[4/12] Checking Python syntax..."
     $PythonFiles = @(
         "main.py",
+        "app_version.py",
         "app_ui.py",
         "calculator_core.py",
+        "conversion_core.py",
+        "exchange_page.py",
         "rate_service.py",
         "settings_service.py",
+        "command_service.py",
+        "local_api.py",
+        "secret_store.py",
+        "c2c",
         "make_icon.py",
         "tools",
         "tests"
