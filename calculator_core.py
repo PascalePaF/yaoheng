@@ -119,6 +119,20 @@ def _normalize_grouped_numbers(expression: str) -> str:
     return _GROUPED_NUMBER_PATTERN.sub(lambda match: match.group(0).replace(",", ""), expression)
 
 
+def _float_literal_underflows(literal: str) -> bool:
+    mantissa = re.split(r"[eE]", literal, maxsplit=1)[0]
+    return float(literal) == 0.0 and any(digit in mantissa for digit in "123456789")
+
+
+def _normalize_structural_characters(expression: str) -> str:
+    return (
+        expression.translate(_FULL_WIDTH_TRANSLATION)
+        .replace("×", "*")
+        .replace("÷", "/")
+        .replace("−", "-")
+    )
+
+
 def _normalize_expression(expression: str) -> str:
     normalized = (
         expression.strip().translate(_FULL_WIDTH_TRANSLATION)
@@ -164,6 +178,8 @@ def _normalize_expression(expression: str) -> str:
             continue
         if token.type == tokenize.NUMBER and not _DECIMAL_NUMBER_PATTERN.fullmatch(token.string):
             raise CalculationError("仅支持十进制数字")
+        if token.type == tokenize.NUMBER and _float_literal_underflows(token.string):
+            raise CalculationError("结果超出可表示范围")
         if token.type not in {tokenize.NUMBER, tokenize.NAME, tokenize.OP}:
             raise CalculationError("表达式包含不安全或不支持的内容")
         if token.type == tokenize.OP and token.string not in {"+", "-", "*", "/", "**", "%", "(", ")"}:
@@ -189,7 +205,6 @@ class SafeEvaluator:
     _binary = {
         ast.Add: operator.add,
         ast.Sub: operator.sub,
-        ast.Mult: operator.mul,
         ast.Mod: operator.mod,
     }
     _unary = {ast.UAdd: operator.pos, ast.USub: operator.neg}
@@ -211,11 +226,27 @@ class SafeEvaluator:
             return float(reduced)
         return math.remainder(float(value), float(period))
 
-    def _to_radians(self, value: float) -> float:
-        return math.radians(self._reduce_degrees(value, 360)) if self.angle_mode == "DEG" else float(value)
-
     def _from_radians(self, value: float) -> float:
         return math.degrees(value) if self.angle_mode == "DEG" else value
+
+    def _sin(self, value: Number) -> float:
+        if self.angle_mode == "DEG":
+            degrees = self._reduce_degrees(value, 360)
+            if degrees in {0.0, -180.0, 180.0}:
+                return 0.0
+            return math.sin(math.radians(degrees))
+        radians = float(value)
+        return 0.0 if radians != 0 and math.remainder(radians, math.pi) == 0 else math.sin(radians)
+
+    def _cos(self, value: Number) -> float:
+        if self.angle_mode == "DEG":
+            degrees = self._reduce_degrees(value, 360)
+            if degrees in {-90.0, 90.0}:
+                return 0.0
+            return math.cos(math.radians(degrees))
+        radians = float(value)
+        odd_quarter_turn = math.remainder(radians - math.pi / 2, math.pi) == 0
+        return 0.0 if odd_quarter_turn else math.cos(radians)
 
     @staticmethod
     def _factorial(value: Number) -> int:
@@ -232,6 +263,13 @@ class SafeEvaluator:
         return math.factorial(integer)
 
     @staticmethod
+    def _multiply(left: Number, right: Number) -> Number:
+        result = operator.mul(left, right)
+        if left != 0 and right != 0 and result == 0:
+            raise CalculationError("结果超出可表示范围")
+        return result
+
+    @staticmethod
     def _divide(left: Number, right: Number) -> Number:
         if right == 0:
             raise ZeroDivisionError
@@ -239,7 +277,10 @@ class SafeEvaluator:
             quotient, remainder = divmod(left, right)
             if remainder == 0:
                 return quotient
-        return operator.truediv(left, right)
+        result = operator.truediv(left, right)
+        if left != 0 and result == 0:
+            raise CalculationError("结果超出可表示范围")
+        return result
 
     @staticmethod
     def _power(left: Number, right: Number) -> Number:
@@ -257,6 +298,15 @@ class SafeEvaluator:
             raise CalculationError("结果超出可表示范围") from exc
         if isinstance(result, complex):
             raise CalculationError("当前不支持复数结果")
+        if left != 0 and result == 0:
+            raise CalculationError("结果超出可表示范围")
+        return result
+
+    @staticmethod
+    def _exp(value: Number) -> float:
+        result = math.exp(value)
+        if result == 0:
+            raise CalculationError("结果超出可表示范围")
         return result
 
     def _tan(self, value: Number) -> float:
@@ -273,8 +323,8 @@ class SafeEvaluator:
 
     def functions(self) -> dict[str, Callable[..., Number]]:
         return {
-            "sin": lambda x: math.sin(self._to_radians(x)),
-            "cos": lambda x: math.cos(self._to_radians(x)),
+            "sin": self._sin,
+            "cos": self._cos,
             "tan": self._tan,
             "asin": lambda x: self._from_radians(math.asin(x)),
             "acos": lambda x: self._from_radians(math.acos(x)),
@@ -286,7 +336,7 @@ class SafeEvaluator:
             "cbrt": math.cbrt,
             "ln": math.log,
             "log": math.log10,
-            "exp": math.exp,
+            "exp": self._exp,
             "abs": abs,
             "floor": math.floor,
             "ceil": math.ceil,
@@ -337,6 +387,8 @@ class SafeEvaluator:
                 return self._guard_result(self._power(left, right))
             if isinstance(node.op, ast.Div):
                 return self._guard_result(self._divide(left, right))
+            if isinstance(node.op, ast.Mult):
+                return self._guard_result(self._multiply(left, right))
             func = self._binary.get(type(node.op))
             if not func:
                 raise CalculationError("不支持该运算")
@@ -440,7 +492,7 @@ class CalculatorModel:
     def preview(self) -> str:
         if not self.expression:
             return "0"
-        if self.expression[-1:] in "+−-×*÷/^%.(":
+        if _normalize_structural_characters(self.expression)[-1:] in "+-*/^%.(":
             return "0"
         try:
             return format_number(self._evaluate_current(close_parentheses=True))
@@ -472,20 +524,22 @@ class CalculatorModel:
 
     @staticmethod
     def _input_into(expression: str, token: str) -> str:
-        operators = "+−-×*÷/^%"
-        if token in operators:
+        normalized = _normalize_structural_characters(expression)
+        normalized_token = _normalize_structural_characters(token)
+        operators = "+-*/^%"
+        if len(normalized_token) == 1 and normalized_token in operators:
             if not expression:
-                return token if token == "−" else expression
-            if expression[-1] == "(":
-                if token == "−":
+                return token if normalized_token == "-" else expression
+            if normalized[-1] == "(":
+                if normalized_token == "-":
                     return expression + token
                 return expression
-            if expression[-1] in operators:
-                last_is_unary = len(expression) == 1 or expression[-2] in operators + "("
-                if token == "−":
+            if normalized[-1] in operators:
+                last_is_unary = len(expression) == 1 or normalized[-2] in operators + "("
+                if normalized_token == "-":
                     if not last_is_unary:
                         return expression + token
-                elif last_is_unary and len(expression) >= 2 and expression[-2] in operators:
+                elif last_is_unary and len(expression) >= 2 and normalized[-2] in operators:
                     return expression[:-2] + token
                 elif last_is_unary:
                     return expression[:-1]
@@ -493,11 +547,14 @@ class CalculatorModel:
                     return expression[:-1] + token
                 return expression
             return expression + token
-        if token == ")" and expression.count("(") <= expression.count(")"):
+        if normalized_token == ")" and normalized.count("(") <= normalized.count(")"):
             return expression
-        if token == ".":
-            tail = re.split(r"[+−\-×*÷/^%()]", expression)[-1]
-            if "." in tail:
+        if normalized_token == ".":
+            tail = re.split(r"[+\-*/^%()]", normalized)[-1]
+            scientific_operand = re.search(
+                r"(?:\d+(?:\.\d*)?|\.\d+)[eE][+\-]?\d+\Z", normalized
+            )
+            if "." in tail or scientific_operand:
                 return expression
             if not tail:
                 token = "0."
@@ -545,11 +602,12 @@ class CalculatorModel:
         if start > 0:
             operator_index = start - 1
             operator_token = expression[operator_index]
+            normalized_operator = _normalize_structural_characters(operator_token)
             left = expression[:operator_index]
             operand = expression[start:]
-            if left and operand and operator_token in "+−-":
+            if left and operand and normalized_operator in "+-":
                 return f"{left}{operator_token}(({left})×({operand})÷100)"
-            if left and operand and operator_token in "×*÷/":
+            if left and operand and normalized_operator in "*/":
                 return f"{left}{operator_token}(({operand})÷100)"
         return f"({expression})÷100"
 
@@ -583,13 +641,31 @@ class CalculatorModel:
         target = expression[start:]
         if not target:
             return expression
-        if target.startswith("−(") and target.endswith(")"):
+        normalized_target = _normalize_structural_characters(target)
+        if normalized_target.startswith("-(") and cls._has_complete_outer_parentheses(target[1:]):
             target = target[2:-1]
-        elif target.startswith("−"):
+        elif normalized_target.startswith("-"):
             target = target[1:]
         else:
             target = f"−({target})"
         return expression[:start] + target
+
+    @staticmethod
+    def _has_complete_outer_parentheses(expression: str) -> bool:
+        normalized = _normalize_structural_characters(expression)
+        if not normalized.startswith("(") or not normalized.endswith(")"):
+            return False
+        depth = 0
+        for index, character in enumerate(normalized):
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0 and index != len(normalized) - 1:
+                    return False
+                if depth < 0:
+                    return False
+        return depth == 0
 
     def toggle_sign(self) -> None:
         if not self.expression:
@@ -607,32 +683,34 @@ class CalculatorModel:
 
     @staticmethod
     def _last_operand_start(expression: str) -> int:
-        operators = "+−-×*÷/^%"
+        normalized = _normalize_structural_characters(expression)
+        operators = "+-*/^%"
         depth = 0
-        for index in range(len(expression) - 1, -1, -1):
-            character = expression[index]
+        for index in range(len(normalized) - 1, -1, -1):
+            character = normalized[index]
             if character == ")":
                 depth += 1
             elif character == "(":
                 depth = max(0, depth - 1)
             elif depth == 0 and character in operators:
                 exponent_sign = (
-                    character in "+−-"
+                    character in "+-"
                     and index >= 2
-                    and expression[index - 1] in "eE"
-                    and (expression[index - 2].isdigit() or expression[index - 2] == ".")
+                    and normalized[index - 1] in "eE"
+                    and (normalized[index - 2].isdigit() or normalized[index - 2] == ".")
                 )
                 if exponent_sign:
                     continue
-                unary = index == 0 or expression[index - 1] in operators + "("
+                unary = index == 0 or normalized[index - 1] in operators + "("
                 if not unary:
                     return index + 1
         return 0
 
     @staticmethod
     def _close_parentheses(expression: str) -> str:
+        normalized = _normalize_structural_characters(expression)
         balance = 0
-        for character in expression:
+        for character in normalized:
             if character == "(":
                 balance += 1
             elif character == ")":
