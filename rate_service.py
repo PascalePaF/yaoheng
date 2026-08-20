@@ -8,11 +8,11 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal, DecimalException, localcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import RLock, get_ident
+from threading import Event, RLock, get_ident
 from typing import Any
 
 import requests
@@ -31,12 +31,17 @@ MANAGED_CACHE_PATTERNS = (
     "fiat_chart_*.json", "fiat_chart_*.tmp*",
 )
 MAX_CACHE_FILE_BYTES = 8 * 1024 * 1024
+MAX_HTTP_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_CHART_POINTS = 20_000
 MAX_CHART_TIMESTAMP_MS = 32_503_680_000_000  # 3000-01-01 UTC; safely renderable on Windows.
 MAX_CHART_VALUE = 1e300  # Leave headroom for chart padding without overflowing float coordinates.
 MAX_FIAT_HISTORY_ROWS = 5_000
 MAX_API_RATE_ENTRIES = 512
 MAX_CRYPTO_ROWS = 200
+MAX_CACHE_RATE_ENTRIES = MAX_API_RATE_ENTRIES + MAX_CRYPTO_ROWS + 16
+MAX_COIN_ID_CHARS = 100
+MAX_DISPLAY_NAME_CHARS = 160
+MAX_FUTURE_TIMESTAMP_SKEW = timedelta(days=1)
 BINANCE_CRYPTOS = {
     "BTC": "Bitcoin", "ETH": "Ethereum", "BNB": "BNB", "XRP": "XRP", "USDC": "USDC",
     "SOL": "Solana", "TRX": "TRON", "DOGE": "Dogecoin", "ADA": "Cardano", "BCH": "Bitcoin Cash",
@@ -176,6 +181,22 @@ def _finite_float(value: Any) -> float:
     return result
 
 
+def _clean_display_name(value: Any, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    cleaned = " ".join(value.split())
+    return cleaned[:MAX_DISPLAY_NAME_CHARS] or fallback
+
+
+def _normalize_coin_id(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    coin_id = value.strip().lower()
+    if len(coin_id) > MAX_COIN_ID_CHARS:
+        return ""
+    return coin_id if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", coin_id) else ""
+
+
 def _normalize_iso_timestamp(value: Any) -> str:
     if not value:
         return ""
@@ -183,7 +204,10 @@ def _normalize_iso_timestamp(value: Any) -> str:
         stamp = datetime.fromisoformat(str(value))
         if stamp.tzinfo is None or stamp.utcoffset() is None:
             return ""
-        return stamp.astimezone(timezone.utc).isoformat()
+        stamp = stamp.astimezone(timezone.utc)
+        if stamp > datetime.now(timezone.utc) + MAX_FUTURE_TIMESTAMP_SKEW:
+            return ""
+        return stamp.isoformat()
     except (OverflowError, TypeError, ValueError):
         return ""
 
@@ -198,9 +222,20 @@ def _unix_timestamp_iso(value: Any) -> str:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("时间戳必须是正有限数")
     try:
-        return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
+        stamp = datetime.fromtimestamp(seconds, timezone.utc)
     except (OSError, OverflowError, ValueError) as exc:
         raise ValueError("时间戳超出支持范围") from exc
+    if stamp > datetime.now(timezone.utc) + MAX_FUTURE_TIMESTAMP_SKEW:
+        raise ValueError("时间戳超出当前时间")
+    return stamp.isoformat()
+
+
+def _timestamp_is_newer(candidate: Any, reference: Any) -> bool:
+    candidate_iso = _normalize_iso_timestamp(candidate)
+    reference_iso = _normalize_iso_timestamp(reference)
+    if not candidate_iso or not reference_iso:
+        return False
+    return datetime.fromisoformat(candidate_iso) > datetime.fromisoformat(reference_iso)
 
 
 def _error_summary(label: str, exc: BaseException) -> str:
@@ -286,7 +321,9 @@ def fiat_daily_changes(rows: list[dict[str, Any]]) -> dict[str, float]:
         previous = ordered[-2][1]
         latest = ordered[-1][1]
         if previous:
-            changes[code] = (latest / previous - 1) * 100
+            candidate = (latest / previous - 1) * 100
+            if math.isfinite(candidate):
+                changes[code] = candidate
     return changes
 
 
@@ -305,7 +342,8 @@ def relative_rate_change(base_change: float | None, target_change: float | None)
     target_factor = 1 + target_change / 100
     if base_factor <= 0 or target_factor <= 0:
         return None
-    return (target_factor / base_factor - 1) * 100
+    candidate = (target_factor / base_factor - 1) * 100
+    return candidate if math.isfinite(candidate) else None
 
 
 def portable_dir() -> Path:
@@ -330,10 +368,21 @@ class RateSnapshot:
         return cls({}, {}, {}, {}, "", "", [], {})
 
 
+@dataclass
+class _RefreshFlight:
+    owner_thread: int
+    done: Event = field(default_factory=Event)
+    result: RateSnapshot | None = None
+    error: BaseException | None = None
+
+
 class RateService:
     def __init__(self, data_dir: Path | None = None) -> None:
         self._state_lock = RLock()
         self._cache_lock = RLock()
+        self._refresh_flights: dict[str, _RefreshFlight] = {}
+        self._refresh_generation = {"fiat": 0, "crypto": 0}
+        self._committed_generation = {"fiat": 0, "crypto": 0}
         self.data_dir = Path(data_dir) if data_dir is not None else portable_dir() / "data"
         self.cache_path = self.data_dir / "rates_cache.json"
         self.session = requests.Session()
@@ -360,6 +409,8 @@ class RateService:
                 data = json.loads(self.cache_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or not isinstance(data.get("rates"), dict):
                 raise ValueError("缓存格式无效")
+            if len(data["rates"]) > MAX_CACHE_RATE_ENTRIES:
+                raise ValueError("缓存中的汇率条目过多")
             rates: dict[str, float] = {}
             for raw_code, raw_value in data["rates"].items():
                 code = str(raw_code).upper()
@@ -371,7 +422,9 @@ class RateService:
                     rates[code] = value
             if not rates:
                 raise ValueError("缓存中没有有效汇率")
-            if "USD" in rates and not math.isclose(rates["USD"], 1.0, rel_tol=0.0, abs_tol=1e-12):
+            if "USD" not in rates or not math.isclose(
+                rates["USD"], 1.0, rel_tol=0.0, abs_tol=1e-12
+            ):
                 raise ValueError("缓存的美元基准汇率无效")
             raw_names_source = data.get("names") if isinstance(data.get("names"), dict) else {}
             raw_kinds_source = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
@@ -379,8 +432,19 @@ class RateService:
             raw_names = {str(code).upper(): value for code, value in raw_names_source.items()}
             raw_kinds = {str(code).upper(): value for code, value in raw_kinds_source.items()}
             raw_changes = {str(code).upper(): value for code, value in raw_changes_source.items()}
-            names = {code: str(raw_names.get(code, code)) for code in rates}
-            kinds = {code: str(raw_kinds.get(code, "")) for code in rates if raw_kinds.get(code) in {"fiat", "crypto"}}
+            names = {
+                code: _clean_display_name(raw_names.get(code), code) for code in rates
+            }
+            kinds: dict[str, str] = {}
+            for code in rates:
+                if code in FIAT_NAMES:
+                    kinds[code] = "fiat"
+                elif code in BINANCE_COIN_IDS:
+                    kinds[code] = "crypto"
+                else:
+                    raw_kind = raw_kinds.get(code)
+                    if isinstance(raw_kind, str) and raw_kind in {"fiat", "crypto"}:
+                        kinds[code] = raw_kind
             changes: dict[str, float | None] = {}
             for code in rates:
                 raw_change = raw_changes.get(code)
@@ -395,7 +459,11 @@ class RateService:
                     changes[code] = change
             raw_coin_ids_source = data.get("coin_ids") if isinstance(data.get("coin_ids"), dict) else {}
             raw_coin_ids = {str(code).upper(): value for code, value in raw_coin_ids_source.items()}
-            coin_ids = {code: str(raw_coin_ids.get(code, "")) for code in rates if raw_coin_ids.get(code)}
+            coin_ids: dict[str, str] = {}
+            for code in rates:
+                coin_id = BINANCE_COIN_IDS.get(code) or _normalize_coin_id(raw_coin_ids.get(code))
+                if coin_id:
+                    coin_ids[code] = coin_id
             raw_errors = data.get("errors") if isinstance(data.get("errors"), list) else []
             return RateSnapshot(
                 rates=rates,
@@ -410,12 +478,13 @@ class RateService:
         except (OSError, OverflowError, RecursionError, ValueError, TypeError):
             return RateSnapshot.empty()
 
-    def save_cache(self, snapshot: RateSnapshot) -> None:
+    def save_cache(self, snapshot: RateSnapshot) -> bool:
         try:
             self._atomic_write_json(self.cache_path, asdict(snapshot))
         except (OSError, RecursionError, TypeError, ValueError):
             # A read-only USB drive should not stop online conversion from working.
-            pass
+            return False
+        return True
 
     def _atomic_write_json(self, path: Path, payload: Any) -> None:
         encoded = json.dumps(
@@ -512,20 +581,49 @@ class RateService:
                 except OSError:
                     pass
 
+    def _get_json(self, url: str, **kwargs: Any) -> Any:
+        """Fetch and decode bounded JSON, including after content decoding."""
+        response = self.session.get(url, stream=True, **kwargs)
+        close = getattr(response, "close", None)
+        try:
+            response.raise_for_status()
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                try:
+                    declared_size = int(headers.get("Content-Length", ""))
+                except (TypeError, ValueError, OverflowError):
+                    declared_size = -1
+                if declared_size > MAX_HTTP_RESPONSE_BYTES:
+                    raise ValueError("网络响应内容过大")
+            iter_content = getattr(response, "iter_content", None)
+            if not callable(iter_content):
+                # Lightweight fake responses in deterministic tests may expose
+                # only json(); production requests.Response always streams here.
+                return response.json()
+            body = bytearray()
+            for chunk in iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                if not isinstance(chunk, (bytes, bytearray)):
+                    raise ValueError("网络响应内容无效")
+                body.extend(chunk)
+                if len(body) > MAX_HTTP_RESPONSE_BYTES:
+                    raise ValueError("网络响应内容过大")
+            return json.loads(bytes(body))
+        finally:
+            if callable(close):
+                close()
+
     def _fetch_fiat_payload(self) -> dict[str, Any]:
-        response = self.session.get(FIAT_API, timeout=(4, 12))
-        response.raise_for_status()
-        return response.json()
+        return self._get_json(FIAT_API, timeout=(4, 12))
 
     def _fetch_fiat_history_rows(self) -> list[dict[str, Any]]:
         today = datetime.now(timezone.utc).date()
-        response = self.session.get(
+        payload = self._get_json(
             FRANKFURTER_API,
             params={"from": (today - timedelta(days=8)).isoformat(), "to": today.isoformat(), "base": "USD"},
             timeout=(4, 12),
         )
-        response.raise_for_status()
-        payload = response.json()
         if (
             not isinstance(payload, list)
             or not payload
@@ -536,13 +634,11 @@ class RateService:
 
     def _fetch_crypto_rows(self) -> list[dict[str, Any]]:
         symbols = [f"{code}USDT" for code in BINANCE_CRYPTOS]
-        response = self.session.get(
+        payload = self._get_json(
             f"{BINANCE_API}/ticker/24hr",
             params={"symbols": json.dumps(symbols, separators=(",", ":")), "type": "MINI"},
             timeout=(4, 12),
         )
-        response.raise_for_status()
-        payload = response.json()
         if not isinstance(payload, list) or not payload or len(payload) > MAX_CRYPTO_ROWS:
             raise ValueError("批量行情数据无效")
         return payload
@@ -550,8 +646,46 @@ class RateService:
     def refresh(self, section: str = "all") -> RateSnapshot:
         if section not in {"all", "fiat", "crypto"}:
             raise ValueError("未知刷新范围")
+        owner = get_ident()
+        with self._state_lock:
+            flight = self._refresh_flights.get(section)
+            if flight is None:
+                flight = _RefreshFlight(owner_thread=owner)
+                self._refresh_flights[section] = flight
+                leader = True
+            else:
+                if flight.owner_thread == owner:
+                    raise RuntimeError("同一线程不能递归刷新同一范围")
+                leader = False
+        if not leader:
+            flight.done.wait()
+            if flight.error is not None:
+                raise flight.error
+            if flight.result is None:
+                raise RuntimeError("合并刷新没有返回结果")
+            return flight.result
+        try:
+            flight.result = self._refresh_once(section)
+            return flight.result
+        except BaseException as exc:
+            flight.error = exc
+            raise
+        finally:
+            with self._state_lock:
+                if self._refresh_flights.get(section) is flight:
+                    self._refresh_flights.pop(section, None)
+            flight.done.set()
+
+    def _refresh_once(self, section: str) -> RateSnapshot:
         with self._state_lock:
             old = self.snapshot
+            requested_kinds = (
+                ("fiat", "crypto") if section == "all" else (section,)
+            )
+            generations: dict[str, int] = {}
+            for kind in requested_kinds:
+                self._refresh_generation[kind] += 1
+                generations[kind] = self._refresh_generation[kind]
         rates = dict(old.rates)
         names = dict(old.names)
         kinds = dict(old.kinds)
@@ -641,9 +775,16 @@ class RateService:
                 unix_time = payload.get("time_last_update_unix")
                 if unix_time is not None:
                     try:
-                        fiat_updated = _unix_timestamp_iso(unix_time)
+                        source_updated = _unix_timestamp_iso(unix_time)
                     except ValueError as exc:
                         errors.append(_error_summary("法币时间戳", exc))
+                    else:
+                        old_updated = _normalize_iso_timestamp(old.fiat_updated_at)
+                        if old_updated and _timestamp_is_newer(old_updated, source_updated):
+                            raise ValueError("返回数据早于本地缓存")
+                        fiat_updated = source_updated
+                else:
+                    errors.append("法币时间戳：响应缺少更新时间")
                 old_fiat_codes = {code for code, kind in kinds.items() if kind == "fiat"}
                 missing_fiat_codes = old_fiat_codes - fiat_rates.keys()
                 if missing_fiat_codes:
@@ -683,9 +824,7 @@ class RateService:
                 crypto_primary_error = exc
         if section in {"all", "crypto"} and not crypto_succeeded:
             try:
-                response = self.session.get(CRYPTO_API, timeout=(3, 10))
-                response.raise_for_status()
-                coins = response.json()
+                coins = self._get_json(CRYPTO_API, timeout=(3, 10))
                 if (
                     not isinstance(coins, list)
                     or not coins
@@ -716,19 +855,22 @@ class RateService:
                         continue
                     if cny_price <= 0:
                         continue
-                    usd_price = cny_price / cny_per_usd
-                    rate = 1.0 / usd_price
+                    rate = cny_per_usd / cny_price
                     if not math.isfinite(rate) or rate <= 0:
                         continue
                     staged_rates[code] = rate
-                    staged_names[code] = str(coin.get("name") or code)
-                    coin_id = str(coin.get("id") or "")
+                    staged_names[code] = _clean_display_name(coin.get("name"), code)
+                    coin_id = _normalize_coin_id(coin.get("id"))
                     if coin_id:
                         staged_coin_ids[code] = coin_id
                     try:
                         change = _finite_float(coin.get("price_change_percentage_24h"))
                     except (TypeError, ValueError, OverflowError):
                         change = None
+                    if change is not None:
+                        usd_change = relative_rate_change(fiat_changes.get("CNY"), change)
+                        if usd_change is not None:
+                            change = usd_change
                     staged_changes[code] = change
                 if not staged_rates:
                     raise ValueError("备用源没有有效行情")
@@ -776,22 +918,45 @@ class RateService:
             raise ConnectionError("暂时无法获取汇率，且本机没有可用缓存")
         with self._state_lock:
             current = self.snapshot
+            fiat_is_stale = bool(
+                fiat_succeeded
+                and self._committed_generation["fiat"] > generations.get("fiat", 0)
+                and not _timestamp_is_newer(fiat_updated, current.fiat_updated_at)
+            )
+            crypto_is_stale = bool(
+                crypto_succeeded
+                and self._committed_generation["crypto"] > generations.get("crypto", 0)
+            )
+            apply_fiat = fiat_succeeded and not fiat_is_stale
+            apply_crypto = crypto_succeeded and not crypto_is_stale
             if current is not old:
-                if not fiat_succeeded:
+                if not apply_fiat:
                     self._replace_snapshot_kind(
                         "fiat", current, rates, names, kinds, changes, coin_ids
                     )
                     fiat_updated = _normalize_iso_timestamp(current.fiat_updated_at)
-                if not crypto_succeeded:
+                if not apply_crypto:
                     self._replace_snapshot_kind(
                         "crypto", current, rates, names, kinds, changes, coin_ids
                     )
-            fetched_at = datetime.now(timezone.utc).isoformat()
+            if apply_fiat:
+                self._committed_generation["fiat"] = max(
+                    self._committed_generation["fiat"], generations["fiat"]
+                )
+            if apply_crypto:
+                self._committed_generation["crypto"] = generations["crypto"]
+            fetched_at = (
+                datetime.now(timezone.utc).isoformat()
+                if apply_fiat or apply_crypto
+                else _normalize_iso_timestamp(current.fetched_at)
+            )
             snapshot = RateSnapshot(
                 rates, names, kinds, changes, fetched_at, fiat_updated, errors[:20], coin_ids
             )
             self.snapshot = snapshot
-            self.save_cache(snapshot)
+            if not self.save_cache(snapshot):
+                warning = "本地缓存：写入失败，本次更新仅在当前会话有效"
+                snapshot.errors = [*(snapshot.errors or [])[:19], warning]
             return snapshot
 
     @staticmethod
@@ -856,11 +1021,14 @@ class RateService:
         # USDCUSDT provides a stable USD anchor for all USDT-quoted pairs.
         # Falling back to parity keeps partial responses usable.
         usdc_last, usdc_open = staged_prices.get("USDC", (1.0, 1.0))
-        usdt_per_usd = usdc_last
-        calibration_factor = (
-            usdc_last / usdc_open
-            if math.isfinite(usdc_open) and usdc_open > 0 else 1.0
-        )
+        # A wildly out-of-range "stablecoin" quote is malformed rather than a
+        # meaningful USD anchor. Preserve valid sibling rows using parity.
+        if 0.1 <= usdc_last <= 10.0 and 0.1 <= usdc_open <= 10.0:
+            calibration_factor = usdc_last / usdc_open
+            usdt_per_usd = usdc_last
+        else:
+            calibration_factor = 1.0
+            usdt_per_usd = 1.0
         rates["USDT"] = usdt_per_usd
         names["USDT"] = "Tether"
         kinds["USDT"] = "crypto"
@@ -896,13 +1064,11 @@ class RateService:
         coin_ids: dict[str, str],
     ) -> None:
         symbols = [f"{code}USDT" for code in BINANCE_CRYPTOS]
-        response = self.session.get(
+        rows = self._get_json(
             f"{BINANCE_API}/ticker/24hr",
             params={"symbols": json.dumps(symbols, separators=(",", ":")), "type": "MINI"},
             timeout=(4, 15),
         )
-        response.raise_for_status()
-        rows = response.json()
         if not isinstance(rows, list) or not rows:
             raise ValueError("备用行情数据无效")
         self._apply_binance_rows(rows, rates, names, kinds, changes, coin_ids)
@@ -947,36 +1113,28 @@ class RateService:
         with self._state_lock:
             snapshot = self.snapshot
             data_dir = self.data_dir
-        coin_id = (snapshot.coin_ids or {}).get(code, "")
-        if not coin_id:
-            coin_id = BINANCE_COIN_IDS.get(code, "")
+        coin_id = BINANCE_COIN_IDS.get(code, "") or _normalize_coin_id(
+            (snapshot.coin_ids or {}).get(code)
+        )
         if not coin_id and code not in BINANCE_CRYPTOS and code != "USDT":
             raise ValueError("暂时没有该币种的行情标识")
-        safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", coin_id or code.lower())
+        safe_id = _normalize_coin_id(coin_id or code.lower())
         if not safe_id:
             raise ValueError("行情标识无效")
         safe_days = days if days in {1, 7, 30, 90, 365} else 7
         cache_path = data_dir / f"chart_{safe_id}_{safe_days}.json"
         url = f"https://api.coingecko.com/api/v3/coins/{safe_id}/market_chart"
         failures: list[str] = []
-        if code in BINANCE_CRYPTOS or code == "USDT":
-            try:
-                points = self._fetch_binance_chart(code, safe_days)
-                try:
-                    self._atomic_write_json(cache_path, points)
-                except (OSError, RecursionError, TypeError, ValueError):
-                    pass
-                return points
-            except Exception as exc:
-                failures.append(_error_summary("批量源趋势", exc))
+        final_error: Exception | None = None
+        # This source supplies historical CNY prices directly. Binance's USDT
+        # candles can only be converted with today's FX anchor, so they are a
+        # resilient fallback rather than the primary CNY history.
         try:
-            response = self.session.get(
+            payload = self._get_json(
                 url,
                 params={"vs_currency": "cny", "days": safe_days},
                 timeout=(5, 20),
             )
-            response.raise_for_status()
-            payload = response.json()
             if not isinstance(payload, dict):
                 raise ValueError("行情数据格式无效")
             points = _normalize_chart_points(payload.get("prices"))
@@ -986,13 +1144,25 @@ class RateService:
                 pass
             return points
         except Exception as exc:
-            failures.append(_error_summary("备用源趋势", exc))
+            final_error = exc
+            failures.append(_error_summary("人民币行情源趋势", exc))
+        if code in BINANCE_CRYPTOS or code == "USDT":
             try:
-                return self._read_chart_cache(cache_path)
-            except (OSError, RecursionError, TypeError, ValueError) as cache_exc:
-                failures.append(_error_summary("本地行情缓存", cache_exc))
-            detail = "；".join(failures[:3])
-            raise ConnectionError(f"行情获取失败，请检查网络后重试：{detail}") from exc
+                points = self._fetch_binance_chart(code, safe_days)
+                try:
+                    self._atomic_write_json(cache_path, points)
+                except (OSError, RecursionError, TypeError, ValueError):
+                    pass
+                return points
+            except Exception as exc:
+                final_error = exc
+                failures.append(_error_summary("USDT 备用趋势", exc))
+        try:
+            return self._read_chart_cache(cache_path)
+        except (OSError, RecursionError, TypeError, ValueError) as cache_exc:
+            failures.append(_error_summary("本地行情缓存", cache_exc))
+        detail = "；".join(failures[:3])
+        raise ConnectionError(f"行情获取失败，请检查网络后重试：{detail}") from final_error
 
     def fetch_fiat_chart(self, code: str, days: int = 7, quote: str = "CNY") -> list[tuple[int, float]]:
         """Return official daily fiat time-series points for a selected pair."""
@@ -1017,13 +1187,11 @@ class RateService:
         try:
             lookback = max(7, safe_days) + 5
             start = (now.date() - timedelta(days=lookback)).isoformat()
-            response = self.session.get(
+            payload = self._get_json(
                 FRANKFURTER_API,
                 params={"from": start, "to": now.date().isoformat(), "base": code, "quotes": quote},
                 timeout=(5, 20),
             )
-            response.raise_for_status()
-            payload = response.json()
             if not isinstance(payload, list):
                 raise ValueError("货币历史行情格式无效")
             raw_points: list[tuple[int, float]] = []
@@ -1067,7 +1235,9 @@ class RateService:
             # currency is outside the historical provider's coverage.
             current = self.convert(1, code, quote)
             span = max(safe_days, 1) * 86_400_000
-            return [(now_ms - span, current), (now_ms, current)]
+            return _normalize_chart_points(
+                [(now_ms - span, current), (now_ms, current)]
+            )
 
     def _fetch_binance_chart(self, code: str, days: int) -> list[tuple[int, float]]:
         intervals = {
@@ -1083,13 +1253,11 @@ class RateService:
         interval, limit = intervals[days]
         invert = code == "USDT"
         symbol = "USDCUSDT" if invert else f"{code}USDT"
-        response = self.session.get(
+        rows = self._get_json(
             f"{BINANCE_API}/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=(4, 18),
         )
-        response.raise_for_status()
-        rows = response.json()
         with self._state_lock:
             raw_cny_per_usd = self.snapshot.rates.get("CNY")
             raw_usdt_per_usd = self.snapshot.rates.get("USDT", 1.0)
@@ -1114,7 +1282,10 @@ class RateService:
             try:
                 if isinstance(row[0], bool):
                     raise TypeError("布尔值不是时间戳")
-                stamp = int(row[0])
+                raw_stamp = _finite_float(row[0])
+                if not raw_stamp.is_integer():
+                    raise ValueError("时间戳不是整数")
+                stamp = int(raw_stamp)
                 close = _finite_float(row[4])
             except (TypeError, ValueError, OverflowError):
                 continue
