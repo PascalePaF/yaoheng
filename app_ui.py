@@ -39,7 +39,7 @@ THEMES = {
     "up": "#35CF8B",
     "down": "#FF5F67",
     "on_accent": "#17100A",
-    "subtle": "#676767",
+    "subtle": "#858585",
     "grid": "#282828",
     "up_fill": "#11251D",
     "down_fill": "#2A1517",
@@ -57,8 +57,8 @@ THEMES = {
     "key": "#E6E9ED",
     "key_hover": "#D8DCE2",
     "muted_key": "#D9DDE2",
-    "accent": "#F57419",
-    "accent_hover": "#FF9145",
+    "accent": "#B44100",
+    "accent_hover": "#C94F00",
     "accent_dark": "#FFE3CF",
     "text": "#17191C",
     "muted": "#68707C",
@@ -66,7 +66,7 @@ THEMES = {
     "up": "#08653E",
     "down": "#A91F2C",
     "on_accent": "#FFFFFF",
-    "subtle": "#8B929C",
+    "subtle": "#646C78",
     "grid": "#E4E7EB",
     "up_fill": "#E2F5EC",
     "down_fill": "#FCE7E9",
@@ -82,6 +82,16 @@ COLORS = dict(THEMES["dark"])
 FONT = "Microsoft YaHei UI"
 BRAND_ORANGE = "#FF9D2E"
 BRAND_DARK = "#171717"
+_FULL_WIDTH_INPUT_TRANSLATION = str.maketrans({
+    **{chr(ord("０") + index): str(index) for index in range(10)},
+    "＋": "+", "－": "-", "＊": "*", "／": "/", "％": "%",
+    "（": "(", "）": ")", "＾": "^", "，": ",", "．": ".", "＝": "=",
+})
+
+
+def normalize_amount_input(value: str) -> str:
+    """Normalize IME/full-width amount input before UI-side validation."""
+    return value.translate(_FULL_WIDTH_INPUT_TRANSLATION)
 
 
 def visible_window_position(
@@ -106,12 +116,20 @@ def visible_window_position(
 
 def enable_dpi_awareness() -> None:
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        context = ctypes.c_void_p(-4)  # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(context):
+            return
     except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:  # PER_MONITOR_DPI_AWARE
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
@@ -206,7 +224,15 @@ class TkResultBridge:
                 break
             self._pending -= 1
             delivered = True
-            self.callback(*payload)
+            try:
+                self.callback(*payload)
+            except Exception:
+                # Tk will report the original callback exception. Keep polling
+                # separately so one bad result cannot strand later deliveries.
+                self._poll_delay = self.poll_ms
+                if self._pending and not self._closed:
+                    self._ensure_poll()
+                raise
             if self._closed:
                 return
         if self._pending:
@@ -406,6 +432,7 @@ class SearchSelect(tk.Frame):
 
     def _show_popup(self) -> None:
         if not self.filtered_values:
+            self.close()
             return
         root = self.winfo_toplevel()
         active = getattr(root, "_active_search_select", None)
@@ -993,7 +1020,7 @@ class CalculatorPage(tk.Frame):
             self.expression_entry.selection_range(0, tk.END)
 
     def _expression_keypress(self, event: tk.Event) -> str | None:
-        if event.char == "=":
+        if normalize_amount_input(event.char) == "=":
             self.after_jobs.schedule(0, self._evaluate_manual_expression, idle=True)
             return "break"
         return None
@@ -1165,7 +1192,7 @@ class DualConverterPage(tk.Frame):
         list_header.grid_columnconfigure(0, weight=1)
         tk.Label(list_header, text=list_title, bg=COLORS["card"], fg=COLORS["text"], font=(FONT, 15, "bold")).grid(row=0, column=0, sticky="w")
         tk.Label(
-            list_header, text="搜索", bg=COLORS["accent"], fg="#111111",
+            list_header, text="搜索", bg=COLORS["accent"], fg=COLORS["on_accent"],
             font=(FONT, 8, "bold"), padx=10, pady=6,
         ).grid(row=0, column=1, padx=(6, 6))
         self.search_selector = SearchSelect(
@@ -1274,23 +1301,24 @@ class DualConverterPage(tk.Frame):
     def _validate_reference_amount(proposed: str) -> bool:
         if len(proposed) > 80:
             return False
-        return all(character in "0123456789,.()%+-*/×÷− =\t" for character in proposed)
+        normalized = normalize_amount_input(proposed)
+        return all(character in "0123456789,.()%+-*/×÷− =\t" for character in normalized)
 
     def _amount_keypress(self, event: tk.Event, side: str) -> str | None:
-        if event.char == "=":
+        if normalize_amount_input(event.char) == "=":
             self.after_jobs.schedule(0, lambda: self.convert_from(side), idle=True)
             return "break"
         return None
 
     def _reference_amount_keypress(self, event: tk.Event) -> str | None:
-        if event.char == "=":
+        if normalize_amount_input(event.char) == "=":
             self.after_jobs.schedule(0, self._commit_reference_amount, idle=True)
             return "break"
         return None
 
     def _commit_reference_amount(self, _event: tk.Event | None = None) -> str:
         try:
-            value = evaluate_basic_amount(self.reference_amount_var.get())
+            value = evaluate_basic_amount(normalize_amount_input(self.reference_amount_var.get()))
             self.reference_amount_value = value
             self.reference_amount_var.set(self._format(value))
             self.update_table(self.service.snapshot)
@@ -1392,7 +1420,7 @@ class DualConverterPage(tk.Frame):
         }
         input_var = variables[side]
         from_code = codes[side]
-        text = input_var.get().replace(",", "").strip()
+        text = normalize_amount_input(input_var.get()).strip()
         if not text:
             for other_side, output_var in variables.items():
                 if other_side != side:
@@ -1465,13 +1493,12 @@ class DualConverterPage(tk.Frame):
         if self.mode == "fiat":
             codes = [code for code in snapshot.rates if snapshot.kinds.get(code) == "fiat"]
             for code in codes:
-                unit_rate = self.service.convert(1, base, code)
                 converted = self.service.convert(amount, base, code)
                 change = 0.0 if code == base else relative_rate_change(snapshot.changes.get(base), snapshot.changes.get(code))
                 change_text = "—" if change is None else f"{change:+.2f}%"
-                tag = "up" if (change is not None and change >= 0) or (change is None and unit_rate >= 1) else "down"
+                tags = () if change is None else (("up",) if change >= 0 else ("down",))
                 name = fiat_display_name(code, snapshot.names.get(code, code))
-                rows.append(((code, name, self._format(converted), change_text, fiat_region(code), "", ""), (tag,)))
+                rows.append(((code, name, self._format(converted), change_text, fiat_region(code), "", ""), tags))
         else:
             codes = [code for code in snapshot.rates if snapshot.kinds.get(code) == "crypto"]
             for code in codes:
@@ -1564,14 +1591,25 @@ class DualConverterPage(tk.Frame):
 
         def key(row: tuple[tuple[str, ...], tuple[str, ...]]):
             value = row[0][index]
-            if numeric:
-                try:
-                    return float(value.replace(",", "").replace("%", "").replace("+", "").replace("—", "nan"))
-                except ValueError:
-                    return float("-inf")
             return value.casefold()
 
-        self.table_rows.sort(key=key, reverse=reverse)
+        if numeric:
+            valued_rows: list[tuple[float, tuple[tuple[str, ...], tuple[str, ...]]]] = []
+            missing_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            for row in self.table_rows:
+                value = row[0][index]
+                try:
+                    number = float(value.replace(",", "").replace("%", "").replace("+", ""))
+                    if not math.isfinite(number):
+                        raise ValueError
+                except ValueError:
+                    missing_rows.append(row)
+                else:
+                    valued_rows.append((number, row))
+            valued_rows.sort(key=lambda item: item[0], reverse=reverse)
+            self.table_rows = [row for _number, row in valued_rows] + missing_rows
+        else:
+            self.table_rows.sort(key=key, reverse=reverse)
         self._set_table_heading_arrows(column, "↓" if reverse else "↑")
         self._render_rows(False)
 
@@ -1740,11 +1778,12 @@ class DualConverterPage(tk.Frame):
 
 
 class PriceChart(tk.Canvas):
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, timestamp_formatter: Callable[[int], str] | None = None) -> None:
         super().__init__(master, bg=COLORS["card"], bd=0, highlightthickness=0, cursor="crosshair")
         self.points: list[tuple[int, float]] = []
         self.currency = "CNY"
         self.line_color = COLORS["accent"]
+        self.timestamp_formatter = timestamp_formatter or self._format_utc_timestamp
         self.bind("<Configure>", lambda _e: self.redraw())
         self.bind("<Motion>", self.show_crosshair)
         self.bind("<Leave>", lambda _e: self.redraw())
@@ -1763,6 +1802,10 @@ class PriceChart(tk.Canvas):
         if abs(value) >= 1:
             return f"{value:.4f}".rstrip("0").rstrip(".")
         return f"{value:.8f}".rstrip("0").rstrip(".")
+
+    @staticmethod
+    def _format_utc_timestamp(timestamp: int) -> str:
+        return datetime.fromtimestamp(timestamp / 1000, ZoneInfo("UTC")).strftime("%m-%d %H:%M")
 
     def _layout(self) -> tuple[float, float, float, float, float, float]:
         width, height = max(self.winfo_width(), 400), max(self.winfo_height(), 240)
@@ -1804,7 +1847,7 @@ class PriceChart(tk.Canvas):
         self.create_line(*coords, fill=self.line_color, width=3, smooth=True)
         for position in (0, len(self.points) // 2, len(self.points) - 1):
             x, _ = self._xy(position, self.points[position][1])
-            label = datetime.fromtimestamp(self.points[position][0] / 1000).strftime("%m-%d %H:%M")
+            label = self.timestamp_formatter(self.points[position][0])
             self.create_text(x, bottom + 18, text=label, fill=COLORS["muted"], font=("Segoe UI", 8), anchor="w" if position == 0 else "e" if position == len(self.points) - 1 else "center")
 
     def show_crosshair(self, event: tk.Event) -> None:
@@ -1820,7 +1863,7 @@ class PriceChart(tk.Canvas):
         self.redraw()
         self.create_line(x, top, x, bottom, fill="#777777", dash=(3, 4), tags="crosshair")
         self.create_line(left, y, right, y, fill="#777777", dash=(3, 4), tags="crosshair")
-        text = f"{datetime.fromtimestamp(timestamp / 1000):%m-%d %H:%M}   {self.number(value)} {self.currency}"
+        text = f"{self.timestamp_formatter(timestamp)}   {self.number(value)} {self.currency}"
         box_x = min(max(x, left + 120), right - 120)
         self.create_rectangle(box_x - 115, top + 6, box_x + 115, top + 35, fill=COLORS["tooltip"], outline=COLORS["line"], tags="crosshair")
         self.create_text(box_x, top + 20, text=text, fill=COLORS["text"], font=("Segoe UI", 9), tags="crosshair")
@@ -1834,11 +1877,13 @@ class MarketPage(tk.Frame):
         refresh_callback: Callable[[], None],
         timestamp_formatter: Callable[[str], str],
         mode: str = "crypto",
+        chart_timestamp_formatter: Callable[[int], str] | None = None,
     ) -> None:
         super().__init__(master, bg=COLORS["bg"])
         self.service = service
         self.refresh_callback = refresh_callback
         self.timestamp_formatter = timestamp_formatter
+        self.chart_timestamp_formatter = chart_timestamp_formatter
         self.mode = mode
         self.current_code = "USD" if mode == "fiat" else "BTC"
         self.current_days = 7
@@ -1990,9 +2035,11 @@ class MarketPage(tk.Frame):
         self.change_label.grid(row=1, column=1, sticky="w", padx=12)
         tk.Label(summary, textvariable=self.range_var, bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9)).grid(row=0, column=3, sticky="e")
 
-        self.chart = PriceChart(chart_card)
+        self.chart = PriceChart(chart_card, self.chart_timestamp_formatter)
         self.chart.grid(row=2, column=0, sticky="nsew", padx=16, pady=(5, 16))
         self.raw_points: list[tuple[int, float]] = []
+        self.raw_points_code = ""
+        self.raw_points_days = 0
         self.raw_points_quote = "CNY"
         self._highlight_days()
 
@@ -2020,14 +2067,14 @@ class MarketPage(tk.Frame):
         return change if change is not None and math.isfinite(change) else None
 
     def _reference_amount_keypress(self, event: tk.Event) -> str | None:
-        if event.char == "=":
+        if normalize_amount_input(event.char) == "=":
             self.after_jobs.schedule(0, self._commit_reference_amount, idle=True)
             return "break"
         return None
 
     def _commit_reference_amount(self, _event: tk.Event | None = None) -> str:
         try:
-            value = evaluate_basic_amount(self.reference_amount_var.get())
+            value = evaluate_basic_amount(normalize_amount_input(self.reference_amount_var.get()))
             self.reference_amount_value = value
             self.reference_amount_var.set(DualConverterPage._format(value))
             self.rerender_currency()
@@ -2176,19 +2223,34 @@ class MarketPage(tk.Frame):
 
         def key(row: tuple[tuple[str, ...], tuple[str, ...]]):
             value = row[0][index]
-            if not numeric:
-                return value.casefold()
+            return value.casefold()
+
+        def number(row: tuple[tuple[str, ...], tuple[str, ...]]) -> float | None:
+            value = row[0][index]
             scale = 1.0
             if value.endswith("K"):
                 scale, value = 1_000.0, value[:-1]
             elif value.endswith("M"):
                 scale, value = 1_000_000.0, value[:-1]
             try:
-                return float(value.replace("%", "").replace("+", "")) * scale
+                result = float(value.replace("%", "").replace("+", "")) * scale
             except ValueError:
-                return float("-inf")
+                return None
+            return result if math.isfinite(result) else None
 
-        self.watch_rows.sort(key=key, reverse=reverse)
+        if numeric:
+            valued_rows: list[tuple[float, tuple[tuple[str, ...], tuple[str, ...]]]] = []
+            missing_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            for row in self.watch_rows:
+                value = number(row)
+                if value is None:
+                    missing_rows.append(row)
+                else:
+                    valued_rows.append((value, row))
+            valued_rows.sort(key=lambda item: item[0], reverse=reverse)
+            self.watch_rows = [row for _number, row in valued_rows] + missing_rows
+        else:
+            self.watch_rows.sort(key=key, reverse=reverse)
         self._set_watch_heading_arrows(column, "↓" if reverse else "↑")
         self._render_watch(False)
 
@@ -2252,12 +2314,27 @@ class MarketPage(tk.Frame):
             self.chart_load_job = None
         self.chart_generation += 1
         generation = self.chart_generation
+        code, days = self.current_code, self.current_days
+        quote = self._fiat_code() if self.mode == "fiat" else "CNY"
+        raw_matches_request = (
+            bool(self.raw_points)
+            and getattr(self, "raw_points_code", "") == code
+            and getattr(self, "raw_points_days", 0) == days
+            and (self.mode != "fiat" or self.raw_points_quote == quote)
+        )
+        if not raw_matches_request:
+            self.raw_points = []
+            self.raw_points_code = ""
+            self.raw_points_days = 0
+            self.chart.set_data([], quote)
+            self.price_var.set("正在加载…")
+            self.change_var.set("—")
+            self.change_label.configure(fg=COLORS["muted"])
+            self.range_var.set("最高 —   最低 —")
+        self.status_var.set(f"正在加载 {code} 的 {days} 日趋势…")
         if self.loading:
             return
         self.loading = True
-        code, days = self.current_code, self.current_days
-        quote = self._fiat_code() if self.mode == "fiat" else "CNY"
-        self.status_var.set(f"正在加载 {code} 的 {days} 日趋势…")
         self.chart_results.expect()
 
         def worker() -> None:
@@ -2294,6 +2371,8 @@ class MarketPage(tk.Frame):
             self.status_var.set(error)
             return
         self.raw_points = points
+        self.raw_points_code = code
+        self.raw_points_days = days
         self.raw_points_quote = quote
         self.status_var.set(f"{code} · {days} 日行情 · 鼠标移入图表可查看具体时点")
         self.rerender_currency()
@@ -2327,7 +2406,12 @@ class MarketPage(tk.Frame):
                 setattr(self, attr, None)
 
     def rerender_currency(self, refresh_watchlist: bool = True) -> None:
-        if not self.raw_points:
+        raw_matches_selection = (
+            bool(self.raw_points)
+            and getattr(self, "raw_points_code", "") == self.current_code
+            and getattr(self, "raw_points_days", 0) == self.current_days
+        )
+        if not raw_matches_selection:
             if refresh_watchlist:
                 self._refresh_watchlist(self.service.snapshot)
             return
@@ -2918,12 +3002,18 @@ class YaohengApp:
             content, self.service, "fiat", self.refresh_rates, self.format_timestamp,
             self.settings.favorite_fiats, self.settings.pinned_fiats, self.save_currency_preferences,
         )
-        self.pages["fiat_market"] = MarketPage(content, self.service, self.refresh_rates, self.format_timestamp, "fiat")
+        self.pages["fiat_market"] = MarketPage(
+            content, self.service, self.refresh_rates, self.format_timestamp, "fiat",
+            self.format_chart_timestamp,
+        )
         self.pages["crypto"] = DualConverterPage(
             content, self.service, "crypto", self.refresh_rates, self.format_timestamp,
             self.settings.favorite_cryptos, self.settings.pinned_cryptos, self.save_currency_preferences,
         )
-        self.pages["market"] = MarketPage(content, self.service, self.refresh_rates, self.format_timestamp, "crypto")
+        self.pages["market"] = MarketPage(
+            content, self.service, self.refresh_rates, self.format_timestamp, "crypto",
+            self.format_chart_timestamp,
+        )
         self.pages["settings"] = SettingsPage(
             content, self.settings, self.set_theme, self.set_timezone, self.set_keep_data_with_app,
             self.save_setting, self.choose_data_directory, self.migrate_application,
@@ -2949,6 +3039,13 @@ class YaohengApp:
         try:
             stamp = datetime.fromisoformat(value)
             return stamp.astimezone(ZoneInfo(self.settings.timezone)).strftime("%Y年%m月%d日 %H:%M:%S")
+        except (ValueError, KeyError, TypeError, OverflowError, OSError):
+            return "时间未知"
+
+    def format_chart_timestamp(self, value: int) -> str:
+        try:
+            stamp = datetime.fromtimestamp(value / 1000, ZoneInfo("UTC"))
+            return stamp.astimezone(ZoneInfo(self.settings.timezone)).strftime("%m-%d %H:%M")
         except (ValueError, KeyError, TypeError, OverflowError, OSError):
             return "时间未知"
 
@@ -3407,6 +3504,11 @@ class YaohengApp:
             self.network_time.configure(
                 text=f"{self.format_timestamp(self.last_network_at)} {self.last_network_detail}"
             )
+        for key in ("fiat_market", "market"):
+            market = self.pages.get(key)
+            chart = getattr(market, "chart", None)
+            if chart is not None:
+                chart.redraw()
 
     def set_keep_data_with_app(self, keep: bool) -> None:
         previous_keep = self.settings.keep_data_with_app
@@ -3503,11 +3605,10 @@ class YaohengApp:
         }
         if keysym in by_keysym:
             return by_keysym[keysym]
-        char = str(getattr(event, "char", ""))
-        char = char.translate(str.maketrans("０１２３４５６７８９＋－＊／％（）．", "0123456789+-*/%()."))
+        char = normalize_amount_input(str(getattr(event, "char", "")))
         if char in "0123456789":
             return char
-        return {"+": "+", "-": "−", "*": "×", "/": "÷", "%": "%", "^": "xʸ", ".": ".", "(": "(", ")": ")", "=": "="}.get(char)
+        return {"+": "+", "-": "−", "*": "×", "/": "÷", "%": "%", "^": "xʸ", ".": ".", ",": ",", "(": "(", ")": ")", "=": "="}.get(char)
 
     def on_key(self, event: tk.Event) -> str | None:
         if self.current_page != "calculator":

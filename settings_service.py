@@ -26,6 +26,18 @@ FALLBACK_TIMEZONES = [
     "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
 ]
 MAX_SETTINGS_FILE_BYTES = 2 * 1024 * 1024
+_SETTINGS_LOCKS_GUARD = threading.Lock()
+_SETTINGS_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _settings_lock(path: Path) -> threading.RLock:
+    """Share one in-process lock between stores that target the same file."""
+    try:
+        normalized = os.path.normcase(str(path.resolve(strict=False)))
+    except (OSError, RuntimeError, ValueError):
+        normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _SETTINGS_LOCKS_GUARD:
+        return _SETTINGS_LOCKS.setdefault(normalized, threading.RLock())
 
 
 @lru_cache(maxsize=1)
@@ -86,7 +98,7 @@ class SettingsStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else portable_dir() / "app_settings.json"
         self.backup_path = self.path.with_suffix(self.path.suffix + ".bak")
-        self._lock = threading.RLock()
+        self._lock = _settings_lock(self.path)
 
     @classmethod
     def from_payload(cls, payload: object) -> AppSettings:
