@@ -48,6 +48,7 @@ _SECRET_PATTERNS = (
     ),
 )
 _LICENSE_NAMES = re.compile(r"^(?:license|copying|notice|authors)(?:[._-].*)?$", re.IGNORECASE)
+_RELEASE_ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _sha256_stream(handle: BinaryIO) -> str:
@@ -209,6 +210,21 @@ def verify_binary(path: Path, forbidden_strings: Iterable[str] = ()) -> None:
     _scan_file_for_needles(path, _encoded_needles(forbidden_strings))
 
 
+def validate_release_asset_names(names: Iterable[str]) -> None:
+    """Reject names that GitHub or command-line tooling could rewrite ambiguously."""
+    seen: set[str] = set()
+    for name in names:
+        if not _RELEASE_ASSET_NAME.fullmatch(name):
+            raise ReleaseCheckError(
+                "release asset names must use only ASCII letters, numbers, dots, "
+                f"underscores, and hyphens: {name!r}"
+            )
+        folded = name.casefold()
+        if folded in seen:
+            raise ReleaseCheckError(f"duplicate release asset name: {name}")
+        seen.add(folded)
+
+
 def _distribution_license_files(distribution: importlib.metadata.Distribution) -> list[tuple[Path, Path]]:
     found: list[tuple[Path, Path]] = []
     for entry in distribution.files or ():
@@ -301,6 +317,7 @@ def write_checksums(output: Path, assets: Iterable[Path]) -> None:
     asset_paths = [path.resolve() for path in assets]
     if not asset_paths:
         raise ReleaseCheckError("no release assets were supplied for checksums")
+    validate_release_asset_names(path.name for path in asset_paths)
     names: set[str] = set()
     lines: list[str] = []
     for path in sorted(asset_paths, key=lambda item: item.name.casefold()):
@@ -352,6 +369,9 @@ def _build_parser() -> argparse.ArgumentParser:
     checksums = subparsers.add_parser("checksums")
     checksums.add_argument("--output", type=Path, required=True)
     checksums.add_argument("--asset", type=Path, action="append", default=[], required=True)
+
+    asset_names = subparsers.add_parser("validate-asset-names")
+    asset_names.add_argument("--asset-name", action="append", default=[], required=True)
     return parser
 
 
@@ -368,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
             collect_licenses(args.staging, args.python_license, args.distribution)
         elif args.command == "checksums":
             write_checksums(args.output, args.asset)
+        elif args.command == "validate-asset-names":
+            validate_release_asset_names(args.asset_name)
     except (OSError, ReleaseCheckError, importlib.metadata.PackageNotFoundError, zipfile.BadZipFile) as exc:
         print(f"release check failed: {exc}", file=sys.stderr)
         return 1

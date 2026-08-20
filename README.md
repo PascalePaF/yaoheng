@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 适合场景 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `曜衡-<版本>-Windows-x64-安装版.exe` | 自动创建开始菜单入口，支持可选桌面快捷方式和标准卸载 |
-| 绿色免安装版 | `曜衡-绿色免安装版.zip` | 解压即用，适合移动硬盘、U 盘或自定义目录 |
+| Windows 安装版（推荐） | `Yaoheng-<版本>-Windows-x64-Setup.exe` | 自动创建开始菜单入口，支持可选桌面快捷方式和标准卸载 |
+| 绿色免安装版 | `Yaoheng-<版本>-Windows-x64-Portable.zip` | 解压即用，适合移动硬盘、U 盘或自定义目录 |
 
 系统要求：Windows 10 或 Windows 11，64 位。实时汇率和行情需要网络连接；短时断网时会尝试使用最近一次可信缓存。
 
@@ -37,8 +37,8 @@
 每次正式构建会生成 `SHA256SUMS.txt`。下载后可用 PowerShell 计算文件摘要，并与清单中的同名文件核对：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\曜衡-<版本>-Windows-x64-安装版.exe"
-Get-FileHash -Algorithm SHA256 ".\曜衡-绿色免安装版.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-<版本>-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-<版本>-Windows-x64-Portable.zip"
 ```
 
 ## 功能亮点
@@ -104,8 +104,8 @@ winget install --id JRSoftware.InnoSetup -e
 构建脚本会在隔离环境中安装完整锁定的依赖、拒绝隐式依赖和源码包、检查语法、运行全部测试，并对暂存目录和压缩包执行内容一致性与隐私扫描，然后生成：
 
 - `release\曜衡\曜衡.exe`：本机可直接运行的文件夹版；
-- `release\曜衡-绿色免安装版.zip`：不含本机隐私数据的绿色版；
-- `release\曜衡-<版本>-Windows-x64-安装版.exe`：当前用户安装包。
+- `release\Yaoheng-<版本>-Windows-x64-Portable.zip`：不含本机隐私数据的绿色版；
+- `release\Yaoheng-<版本>-Windows-x64-Setup.exe`：当前用户安装包。
 - `release\SHA256SUMS.txt`：上述可发布 ZIP 与安装器的 SHA-256 清单。
 
 安装器使用 Inno Setup 的稳定版工具链构建。简体中文安装界面采用项目内固定版本的第三方翻译，来源与许可证见 `installer/THIRD-PARTY-NOTICES.txt`；成品中的 `licenses/` 目录包含实际捆绑的 Python、OpenSSL、Tcl/Tk 与 Python 依赖许可证文本。

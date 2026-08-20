@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 $ProjectDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $AppName = -join @([char]26332, [char]34913)
 $AppVersion = "3.16"
+$ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion
 $GuideName = (-join @([char]20351, [char]29992, [char]35828, [char]26126)) + ".txt"
 $ThirdPartyNoticeName = "THIRD-PARTY-NOTICES.txt"
 $PathSeparators = [char[]]@(
@@ -107,10 +108,13 @@ $ReleaseRoot = Assert-SafeChildPath -Path (Join-Path $ProjectDir "release") -All
 $StagedPortableDir = Assert-SafeChildPath -Path (Join-Path $DistRoot $AppName) -AllowedRoot $DistRoot
 $PortableDir = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot $AppName) -AllowedRoot $ReleaseRoot
 $PortableExecutable = Assert-SafeChildPath -Path (Join-Path $PortableDir ($AppName + ".exe")) -AllowedRoot $PortableDir
-$ZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($AppName + "-绿色免安装版.zip")) -AllowedRoot $ReleaseRoot
+$PortableAssetName = $ReleaseAssetStem + "-Portable.zip"
+$ZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot $PortableAssetName) -AllowedRoot $ReleaseRoot
 $InstallerScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "installer\installer.iss") -AllowedRoot $ProjectDir
-$InstallerBaseName = $AppName + "-" + $AppVersion + "-Windows-x64-安装版"
+$InstallerBaseName = $ReleaseAssetStem + "-Setup"
 $InstallerPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($InstallerBaseName + ".exe")) -AllowedRoot $ReleaseRoot
+$LegacyZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($AppName + "-绿色免安装版.zip")) -AllowedRoot $ReleaseRoot
+$LegacyInstallerNamePattern = "^" + [regex]::Escape($AppName) + "-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-安装版\.exe$"
 $ChecksumManifestPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot "SHA256SUMS.txt") -AllowedRoot $ReleaseRoot
 $ReleaseChecksScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "tools\release_checks.py") -AllowedRoot $ProjectDir
 $PrivacyStrings = @($ProjectDir)
@@ -135,6 +139,11 @@ try {
     if (-not (Test-Path -LiteralPath $PythonLicensePath -PathType Leaf)) {
         throw "Python license file was not found: $PythonLicensePath"
     }
+    Invoke-Python -PythonArguments @(
+        $ReleaseChecksScript, "validate-asset-names",
+        "--asset-name", ([System.IO.Path]::GetFileName($InstallerPath)),
+        "--asset-name", ([System.IO.Path]::GetFileName($ZipPath))
+    ) -FailureMessage "Release asset name validation failed"
     $RunningPortableProcesses = @(
         Get-Process -Name $AppName -ErrorAction SilentlyContinue | Where-Object {
             try {
@@ -155,7 +164,15 @@ try {
 
     # Remove only the known publishable assets up front. If a later step fails,
     # stale binaries cannot be mistaken for output from the failed build.
-    foreach ($PublishablePath in @($ZipPath, $InstallerPath, $ChecksumManifestPath)) {
+    $LegacyPublishablePaths = @($LegacyZipPath)
+    if (Test-Path -LiteralPath $ReleaseRoot -PathType Container) {
+        $LegacyPublishablePaths += @(
+            Get-ChildItem -LiteralPath $ReleaseRoot -File | Where-Object {
+                $_.Name -match $LegacyInstallerNamePattern
+            } | ForEach-Object { $_.FullName }
+        )
+    }
+    foreach ($PublishablePath in @($ZipPath, $InstallerPath, $ChecksumManifestPath) + $LegacyPublishablePaths) {
         $null = Assert-SafeChildPath -Path $PublishablePath -AllowedRoot $ReleaseRoot
         if (Test-Path -LiteralPath $PublishablePath) {
             Remove-Item -LiteralPath $PublishablePath -Force

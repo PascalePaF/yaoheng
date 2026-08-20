@@ -5,6 +5,7 @@ from pathlib import Path
 
 from tools.release_checks import (
     ReleaseCheckError,
+    validate_release_asset_names,
     verify_staging,
     verify_zip,
     write_checksums,
@@ -86,6 +87,41 @@ class ReleaseChecksTests(unittest.TestCase):
             lines = manifest.read_text(encoding="utf-8").splitlines()
             self.assertEqual([line.split("  ", 1)[1] for line in lines], ["a.exe", "b.zip"])
             self.assertTrue(all(len(line.split("  ", 1)[0]) == 64 for line in lines))
+
+    def test_release_asset_names_are_stable_ascii(self):
+        expected = [
+            "Yaoheng-3.16-Windows-x64-Setup.exe",
+            "Yaoheng-3.16-Windows-x64-Portable.zip",
+        ]
+        validate_release_asset_names(expected)
+
+        for unsafe in (
+            "曜衡-3.16-Windows-x64-安装版.exe",
+            "nested/Yaoheng.zip",
+            "Yaoheng Portable.zip",
+        ):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaisesRegex(ReleaseCheckError, "ASCII"):
+                    validate_release_asset_names([unsafe])
+
+        with self.assertRaisesRegex(ReleaseCheckError, "duplicate"):
+            validate_release_asset_names([expected[0], expected[0].upper()])
+
+    def test_windows_build_configs_use_expected_release_asset_names(self):
+        project_root = Path(__file__).resolve().parents[1]
+        build_script = (project_root / "build.ps1").read_text(encoding="utf-8-sig")
+        installer_script = (project_root / "installer" / "installer.iss").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn('$ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion', build_script)
+        self.assertIn('$PortableAssetName = $ReleaseAssetStem + "-Portable.zip"', build_script)
+        self.assertIn('$InstallerBaseName = $ReleaseAssetStem + "-Setup"', build_script)
+        self.assertIn('$LegacyPublishablePaths = @($LegacyZipPath)', build_script)
+        self.assertIn(
+            "OutputBaseFilename=Yaoheng-{#AppVersion}-Windows-x64-Setup",
+            installer_script,
+        )
 
 
 if __name__ == "__main__":
