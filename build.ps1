@@ -125,16 +125,15 @@ if ($env:USERPROFILE) {
 Push-Location -LiteralPath $ProjectDir
 try {
     Write-Host "[1/12] Checking build prerequisites..."
+    if (-not (Test-Path -LiteralPath $ReleaseChecksScript -PathType Leaf)) {
+        throw "Release checks script was not found: $ReleaseChecksScript"
+    }
     Invoke-Python -PythonArguments @(
-        "-c",
-        "import ssl, sys; py=sys.version_info[:3]; openssl=ssl.OPENSSL_VERSION_INFO[:3]; floors={(3,0):(3,0,21),(3,4):(3,4,6),(3,5):(3,5,7),(3,6):(3,6,3),(4,0):(4,0,1)}; floor=floors.get(openssl[:2]); sys.exit(f'Python 3.13.15 or newer is required for release builds (found {py})') if py < (3,13,15) else None; sys.exit(f'The bundled OpenSSL branch/version is not approved for release builds: {ssl.OPENSSL_VERSION}') if floor is None or openssl < floor else None; print(f'Release runtime: Python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}')"
+        $ReleaseChecksScript, "validate-runtime"
     ) -FailureMessage "Release runtime security check failed"
     $InnoCompilerPath = Find-InnoCompiler
     if (-not (Test-Path -LiteralPath $InstallerScript -PathType Leaf)) {
         throw "Installer script was not found: $InstallerScript"
-    }
-    if (-not (Test-Path -LiteralPath $ReleaseChecksScript -PathType Leaf)) {
-        throw "Release checks script was not found: $ReleaseChecksScript"
     }
     if (-not (Test-Path -LiteralPath $PythonLicensePath -PathType Leaf)) {
         throw "Python license file was not found: $PythonLicensePath"

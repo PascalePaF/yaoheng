@@ -6,6 +6,7 @@ from pathlib import Path
 from tools.release_checks import (
     ReleaseCheckError,
     validate_release_asset_names,
+    validate_release_runtime,
     verify_staging,
     verify_zip,
     write_checksums,
@@ -122,6 +123,29 @@ class ReleaseChecksTests(unittest.TestCase):
             "OutputBaseFilename=Yaoheng-{#AppVersion}-Windows-x64-Setup",
             installer_script,
         )
+
+    def test_release_runtime_parses_openssl_patch_field_correctly(self):
+        validate_release_runtime(
+            (3, 13, 15),
+            (3, 0, 0, 21, 0),
+            "OpenSSL 3.0.21",
+        )
+        validate_release_runtime(
+            (3, 14, 0),
+            (3, 6, 0, 3, 0),
+            "OpenSSL 3.6.3",
+        )
+
+        with self.assertRaisesRegex(ReleaseCheckError, "Python 3.13.15"):
+            validate_release_runtime((3, 13, 14), (3, 0, 0, 21, 0), "OpenSSL 3.0.21")
+        with self.assertRaisesRegex(ReleaseCheckError, "not approved"):
+            validate_release_runtime((3, 13, 15), (3, 0, 0, 20, 0), "OpenSSL 3.0.20")
+        with self.assertRaisesRegex(ReleaseCheckError, "unrecognized"):
+            validate_release_runtime((3, 13, 15), (3, 0, 21), "OpenSSL malformed")
+
+        project_root = Path(__file__).resolve().parents[1]
+        build_script = (project_root / "build.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn('$ReleaseChecksScript, "validate-runtime"', build_script)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import importlib.metadata
 import os
 import re
 import shutil
+import ssl
 import stat
 import sys
 import zipfile
@@ -49,6 +50,14 @@ _SECRET_PATTERNS = (
 )
 _LICENSE_NAMES = re.compile(r"^(?:license|copying|notice|authors)(?:[._-].*)?$", re.IGNORECASE)
 _RELEASE_ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MIN_RELEASE_PYTHON = (3, 13, 15)
+_OPENSSL_SECURITY_FLOORS = {
+    (3, 0): (3, 0, 21),
+    (3, 4): (3, 4, 6),
+    (3, 5): (3, 5, 7),
+    (3, 6): (3, 6, 3),
+    (4, 0): (4, 0, 1),
+}
 
 
 def _sha256_stream(handle: BinaryIO) -> str:
@@ -225,6 +234,44 @@ def validate_release_asset_names(names: Iterable[str]) -> None:
         seen.add(folded)
 
 
+def validate_release_runtime(
+    python_version: tuple[int, ...],
+    openssl_version_info: tuple[int, ...],
+    openssl_label: str,
+) -> None:
+    if tuple(python_version[:3]) < _MIN_RELEASE_PYTHON:
+        found = ".".join(str(part) for part in python_version[:3])
+        required = ".".join(str(part) for part in _MIN_RELEASE_PYTHON)
+        raise ReleaseCheckError(
+            f"Python {required} or newer is required for release builds (found {found})"
+        )
+
+    # ssl.OPENSSL_VERSION_INFO follows OpenSSL's five-field numeric encoding:
+    # (major, minor, fix, patch, status). OpenSSL 3.0.21 is therefore
+    # represented as (3, 0, 0, 21, 0), not (3, 0, 21).
+    if len(openssl_version_info) < 4:
+        raise ReleaseCheckError(f"unrecognized OpenSSL version metadata: {openssl_version_info!r}")
+    openssl_security_version = (
+        openssl_version_info[0],
+        openssl_version_info[1],
+        openssl_version_info[3],
+    )
+    floor = _OPENSSL_SECURITY_FLOORS.get(openssl_security_version[:2])
+    if floor is None or openssl_security_version < floor:
+        raise ReleaseCheckError(
+            f"the bundled OpenSSL branch/version is not approved for release builds: {openssl_label}"
+        )
+
+
+def validate_current_release_runtime() -> None:
+    validate_release_runtime(
+        tuple(sys.version_info[:3]),
+        tuple(ssl.OPENSSL_VERSION_INFO),
+        ssl.OPENSSL_VERSION,
+    )
+    print(f"Release runtime: Python {sys.version.split()[0]}, {ssl.OPENSSL_VERSION}")
+
+
 def _distribution_license_files(distribution: importlib.metadata.Distribution) -> list[tuple[Path, Path]]:
     found: list[tuple[Path, Path]] = []
     for entry in distribution.files or ():
@@ -372,6 +419,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     asset_names = subparsers.add_parser("validate-asset-names")
     asset_names.add_argument("--asset-name", action="append", default=[], required=True)
+
+    subparsers.add_parser("validate-runtime")
     return parser
 
 
@@ -390,6 +439,8 @@ def main(argv: list[str] | None = None) -> int:
             write_checksums(args.output, args.asset)
         elif args.command == "validate-asset-names":
             validate_release_asset_names(args.asset_name)
+        elif args.command == "validate-runtime":
+            validate_current_release_runtime()
     except (OSError, ReleaseCheckError, importlib.metadata.PackageNotFoundError, zipfile.BadZipFile) as exc:
         print(f"release check failed: {exc}", file=sys.stderr)
         return 1
