@@ -118,7 +118,10 @@ class ReleaseChecksTests(unittest.TestCase):
         self.assertIn('$ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion', build_script)
         self.assertIn('$PortableAssetName = $ReleaseAssetStem + "-Portable.zip"', build_script)
         self.assertIn('$InstallerBaseName = $ReleaseAssetStem + "-Setup"', build_script)
-        self.assertIn('$LegacyPublishablePaths = @($LegacyZipPath)', build_script)
+        self.assertIn('$StalePublishablePaths = @($LegacyZipPath)', build_script)
+        self.assertIn("$ManagedReleaseAssetNamePattern", build_script)
+        self.assertIn("Portable\\.zip", build_script)
+        self.assertIn("Setup\\.exe", build_script)
         self.assertIn(
             "OutputBaseFilename=Yaoheng-{#AppVersion}-Windows-x64-Setup",
             installer_script,

@@ -114,7 +114,7 @@ $InstallerScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "installer\
 $InstallerBaseName = $ReleaseAssetStem + "-Setup"
 $InstallerPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($InstallerBaseName + ".exe")) -AllowedRoot $ReleaseRoot
 $LegacyZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($AppName + "-绿色免安装版.zip")) -AllowedRoot $ReleaseRoot
-$LegacyInstallerNamePattern = "^" + [regex]::Escape($AppName) + "-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-安装版\.exe$"
+$ManagedReleaseAssetNamePattern = "^(?:Yaoheng-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-(?:Setup\.exe|Portable\.zip)|" + [regex]::Escape($AppName) + "-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-安装版\.exe)$"
 $ChecksumManifestPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot "SHA256SUMS.txt") -AllowedRoot $ReleaseRoot
 $ReleaseChecksScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "tools\release_checks.py") -AllowedRoot $ProjectDir
 $PrivacyStrings = @($ProjectDir)
@@ -163,15 +163,15 @@ try {
 
     # Remove only the known publishable assets up front. If a later step fails,
     # stale binaries cannot be mistaken for output from the failed build.
-    $LegacyPublishablePaths = @($LegacyZipPath)
+    $StalePublishablePaths = @($LegacyZipPath)
     if (Test-Path -LiteralPath $ReleaseRoot -PathType Container) {
-        $LegacyPublishablePaths += @(
+        $StalePublishablePaths += @(
             Get-ChildItem -LiteralPath $ReleaseRoot -File | Where-Object {
-                $_.Name -match $LegacyInstallerNamePattern
+                $_.Name -match $ManagedReleaseAssetNamePattern
             } | ForEach-Object { $_.FullName }
         )
     }
-    foreach ($PublishablePath in @($ZipPath, $InstallerPath, $ChecksumManifestPath) + $LegacyPublishablePaths) {
+    foreach ($PublishablePath in @($ZipPath, $InstallerPath, $ChecksumManifestPath) + $StalePublishablePaths) {
         $null = Assert-SafeChildPath -Path $PublishablePath -AllowedRoot $ReleaseRoot
         if (Test-Path -LiteralPath $PublishablePath) {
             Remove-Item -LiteralPath $PublishablePath -Force
