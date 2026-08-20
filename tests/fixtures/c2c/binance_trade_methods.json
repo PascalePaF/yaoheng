@@ -1,0 +1,9 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": [
+    {"identifier": "FIXTURE_BANK", "tradeMethodName": "脱敏银行方式"},
+    {"identifier": "FIXTURE_WALLET", "tradeMethodName": "脱敏钱包方式"}
+  ],
+  "success": true
+}

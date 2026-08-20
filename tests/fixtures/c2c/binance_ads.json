@@ -1,0 +1,50 @@
+{
+  "code": "000000",
+  "message": null,
+  "data": [
+    {
+      "adv": {
+        "advNo": "fixture-binance-a",
+        "asset": "USDT",
+        "fiatUnit": "CNY",
+        "tradeType": "BUY",
+        "price": "7.10",
+        "surplusAmount": "1000",
+        "minSingleTransAmount": "5000",
+        "maxSingleTransAmount": "10000",
+        "assetScale": "2",
+        "fiatScale": "2",
+        "tradeMethods": [
+          {"identifier": "FIXTURE_BANK"}
+        ]
+      },
+      "advertiser": {
+        "monthFinishRate": "0.99",
+        "monthOrderCount": "120"
+      }
+    },
+    {
+      "adv": {
+        "advNo": "fixture-binance-b",
+        "asset": "USDT",
+        "fiatUnit": "CNY",
+        "tradeType": "BUY",
+        "price": "7.20",
+        "surplusAmount": "500",
+        "minSingleTransAmount": "100",
+        "maxSingleTransAmount": "3000",
+        "assetScale": "2",
+        "fiatScale": "2",
+        "tradeMethods": [
+          {"identifier": "FIXTURE_BANK"},
+          {"identifier": "FIXTURE_WALLET"}
+        ]
+      },
+      "advertiser": {
+        "monthFinishRate": "0.98",
+        "monthOrderCount": "300"
+      }
+    }
+  ],
+  "success": true
+}

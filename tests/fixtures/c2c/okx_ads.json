@@ -1,0 +1,24 @@
+{
+  "code": "0",
+  "data": {
+    "ads": [
+      {
+        "adId": "fixture-okx-a",
+        "asset": "USDT",
+        "fiatCurrency": "CNY",
+        "side": "B",
+        "unitPrice": "7.15",
+        "availableAmount": "400",
+        "minFiatAmount": "100",
+        "maxFiatAmount": "2500",
+        "assetStep": "0.01",
+        "fiatStep": "0.01",
+        "paymentMethods": [
+          {"identifier": "FIXTURE_BANK"}
+        ],
+        "completionRate": "98.5",
+        "completedOrders": "88"
+      }
+    ]
+  }
+}
