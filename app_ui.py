@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+import http.client
+import json
 import math
 import os
 import shutil
@@ -13,11 +15,27 @@ from datetime import datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable
+from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 
+from app_version import APP_VERSION
 from calculator_core import CalculationError, CalculatorModel, evaluate_basic_amount, format_number
+from c2c import BinanceP2PAdapter, C2CQuoteService, OkxP2PAdapter
+from command_service import CommandService
+from exchange_page import (
+    PAYMENT_ALL_LABEL,
+    PAYMENT_UNKNOWN_LABEL,
+    PROVIDER_BY_LABEL,
+    PROVIDER_LABELS,
+    C2CQuoteJob,
+    ExchangeCoordinator,
+    ExchangeEdgeResult,
+    ExchangePage,
+    ExchangePageState,
+)
+from local_api import LocalAPIError, LocalAPIPortInUseError, LocalAPIServer
 from rate_service import RateService, RateSnapshot, crypto_display_name, fiat_display_name, fiat_region, portable_dir, relative_rate_change
+from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
 
 
@@ -287,6 +305,69 @@ class TkAfterJobs:
             except tk.TclError:
                 pass
         self.jobs.clear()
+
+
+class AppC2CService:
+    """Application facade that keeps adapters private and UI parsing-free."""
+
+    def __init__(self, rate_service: RateService) -> None:
+        self.rate_service = rate_service
+        self.providers = {
+            "binance": BinanceP2PAdapter(),
+            "okx": OkxP2PAdapter(),
+        }
+        self.service = C2CQuoteService(
+            self.providers,
+            market_fallback=self._market_fallback,
+        )
+
+    def _market_fallback(self, request: object) -> dict[str, str]:
+        asset = str(getattr(request, "asset", ""))
+        fiat = str(getattr(request, "fiat", ""))
+        return {
+            "price": self.rate_service.convert_exact("1", asset, fiat),
+            "source": "ordinary_market",
+        }
+
+    def quote(self, request: object, *, cancel: object | None = None) -> object:
+        return self.service.quote(request, cancel=cancel)  # type: ignore[arg-type]
+
+    def capabilities(self) -> object:
+        return self.service.capabilities()
+
+    def clear_memory_cache(self) -> None:
+        self.service.clear_memory_cache()
+
+    def payment_methods(self, provider: str, fiat: str) -> tuple[object, ...]:
+        """Fetch official provider identifiers; callers run this off the Tk thread."""
+
+        selected = str(provider or "auto").lower()
+        candidates = (
+            tuple(self.providers.values())
+            if selected == "auto"
+            else (self.providers.get(selected),)
+        )
+        methods: list[object] = []
+        identifiers: set[str] = set()
+        for adapter in candidates:
+            if adapter is None:
+                continue
+            capability = adapter.capability
+            if not capability.enabled or not capability.configured or not capability.trade_methods:
+                continue
+            loader = getattr(adapter, "list_trade_methods", None)
+            if not callable(loader):
+                continue
+            try:
+                rows = tuple(loader(fiat))
+            except Exception:
+                continue
+            for row in rows:
+                identifier = str(getattr(row, "identifier", ""))
+                if identifier and identifier not in identifiers:
+                    identifiers.add(identifier)
+                    methods.append(row)
+        return tuple(methods)
 
 
 class AppButton(tk.Button):
@@ -1073,6 +1154,9 @@ class DualConverterPage(tk.Frame):
         favorite_codes: list[str] | None = None,
         pinned_codes: list[str] | None = None,
         preference_callback: Callable[[str, list[str], list[str]], None] | None = None,
+        coordinator: ExchangeCoordinator | None = None,
+        page_state: Mapping[str, object] | None = None,
+        state_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         super().__init__(master, bg=COLORS["bg"])
         self.service = service
@@ -1083,16 +1167,32 @@ class DualConverterPage(tk.Frame):
         self.pinned_codes = list(dict.fromkeys(pinned_codes or []))
         self.favorites_only = False
         self.preference_callback = preference_callback or (lambda _mode, _favorites, _pins: None)
+        self.coordinator = coordinator
+        self.state_callback = state_callback or (lambda _state: None)
+        restored = dict(page_state or {})
+        restored_amounts = restored.get("amounts")
+        if not isinstance(restored_amounts, list) or len(restored_amounts) != 3:
+            restored_amounts = ["1000" if mode == "fiat" else "10000", "", ""]
+        restored_codes = restored.get("currencies")
+        if not isinstance(restored_codes, list) or len(restored_codes) != 3:
+            restored_codes = []
+        self.restored_codes = tuple(str(code).strip().upper() for code in restored_codes)
+        self.restored_table_base = str(restored.get("table_base", "")).strip().upper()
         self.title = "货币换算" if mode == "fiat" else "虚拟币换算"
-        self.amount_a = tk.StringVar(value="1000" if mode == "fiat" else "10000")
-        self.amount_b = tk.StringVar(value="")
-        self.amount_c = tk.StringVar(value="")
+        self.amount_a = tk.StringVar(value=str(restored_amounts[0])[:128])
+        self.amount_b = tk.StringVar(value=str(restored_amounts[1])[:128])
+        self.amount_c = tk.StringVar(value=str(restored_amounts[2])[:128])
         self.currency_a = tk.StringVar()
         self.currency_b = tk.StringVar()
         self.currency_c = tk.StringVar()
         self.table_base_var = tk.StringVar()
-        self.reference_amount_var = tk.StringVar(value="1")
-        self.reference_amount_value = 1.0
+        restored_reference = str(restored.get("reference_amount", "1"))[:80]
+        self.reference_amount_var = tk.StringVar(value=restored_reference)
+        try:
+            self.reference_amount_value = evaluate_basic_amount(restored_reference)
+        except CalculationError:
+            self.reference_amount_value = 1.0
+            self.reference_amount_var.set("1")
         meaningful = (
             "支持全球货币 A/B/C 三端联动；金额框可直接计算加减乘除、除余和括号。"
             if mode == "fiat" else
@@ -1102,7 +1202,30 @@ class DualConverterPage(tk.Frame):
         self.refresh_stamp_var = tk.StringVar(value="最新刷新：等待联网")
         self.search_var = tk.StringVar()
         self.rate_var = tk.StringVar(value="在任意一端输入金额或算式，按回车、= 或点击输入框外完成计算与换算")
-        self.active_side = "a"
+        restored_side = str(restored.get("active_side", "a")).lower()
+        self.active_side = restored_side if restored_side in {"a", "b", "c"} else "a"
+        restored_exchange_mode = str(restored.get("mode", "market")).lower()
+        self.exchange_mode = restored_exchange_mode if restored_exchange_mode in {"market", "c2c"} else "market"
+        restored_provider = str(restored.get("provider", "auto")).lower()
+        self.c2c_provider = restored_provider if restored_provider in PROVIDER_LABELS else "auto"
+        restored_payment = str(restored.get("payment_method", ""))
+        self.c2c_payment_method = restored_payment if len(restored_payment) <= 64 else ""
+        self.mode_var = tk.StringVar(value="C2C 按金额" if self.exchange_mode == "c2c" else "普通汇率")
+        self.provider_var = tk.StringVar(value=PROVIDER_LABELS[self.c2c_provider])
+        self.payment_var = tk.StringVar(value=PAYMENT_ALL_LABEL)
+        self.payment_by_label: dict[str, str] = {PAYMENT_ALL_LABEL: ""}
+        self.payment_cache: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+        self.payment_request: tuple[str, str, int] | None = None
+        self.conversion_generation = 0
+        self.c2c_edge_results: dict[int, ExchangeEdgeResult] = {}
+        self.c2c_pending_slots: set[int] = set()
+        self.crypto_payment_generation = 0
+        self.payment_supported_fiat = ""
+        self.current_snapshot: RateSnapshot | None = None
+        self.current_snapshot_from_cache = False
+        self.visible = False
+        self.conversion_bridge = TkResultBridge(self, self._finish_c2c_conversion)
+        self.payment_bridge = TkResultBridge(self, self._finish_crypto_payment_options)
         self.display_to_code: dict[str, str] = {}
         self.code_to_display: dict[str, str] = {}
         self.combo_a_all: list[str] = []
@@ -1136,6 +1259,28 @@ class DualConverterPage(tk.Frame):
             header, textvariable=self.refresh_stamp_var, bg=COLORS["accent_dark"], fg=COLORS["accent"],
             font=(FONT, 9, "bold"), padx=13, pady=9,
         ).grid(row=0, column=2, rowspan=2)
+        self.mode_combo: ttk.Combobox | None = None
+        self.provider_combo: ttk.Combobox | None = None
+        self.payment_combo: ttk.Combobox | None = None
+        if self.mode == "crypto":
+            c2c_controls = tk.Frame(header, bg=COLORS["card"])
+            c2c_controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+            c2c_controls.grid_columnconfigure(1, weight=1)
+            c2c_controls.grid_columnconfigure(3, weight=1)
+            c2c_controls.grid_columnconfigure(5, weight=2)
+            tk.Label(c2c_controls, text="换算模式", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=0, padx=(12, 6), pady=8)
+            self.mode_combo = ttk.Combobox(c2c_controls, textvariable=self.mode_var, values=("普通汇率", "C2C 按金额"), state="readonly", width=14)
+            self.mode_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
+            self.mode_combo.bind("<<ComboboxSelected>>", self._crypto_mode_changed)
+            tk.Label(c2c_controls, text="来源", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=2, padx=(0, 6))
+            self.provider_combo = ttk.Combobox(c2c_controls, textvariable=self.provider_var, values=tuple(PROVIDER_LABELS.values()), state="readonly", width=11)
+            self.provider_combo.grid(row=0, column=3, sticky="ew", padx=(0, 10), pady=6)
+            self.provider_combo.bind("<<ComboboxSelected>>", self._crypto_provider_changed)
+            tk.Label(c2c_controls, text="支付", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=4, padx=(0, 6))
+            self.payment_combo = ttk.Combobox(c2c_controls, textvariable=self.payment_var, values=(PAYMENT_UNKNOWN_LABEL,), state="readonly", width=24)
+            self.payment_combo.grid(row=0, column=5, sticky="ew", padx=(0, 12), pady=6)
+            self.payment_combo.bind("<<ComboboxSelected>>", self._crypto_payment_changed)
+            self._update_crypto_control_states()
 
         body = tk.Frame(self, bg=COLORS["bg"])
         body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 26))
@@ -1278,7 +1423,7 @@ class DualConverterPage(tk.Frame):
             highlightthickness=1, highlightbackground=COLORS["accent"], highlightcolor=COLORS["accent"],
         )
         entry.grid(row=1, column=0, sticky="ew", pady=(6, 0), ipady=9)
-        entry.bind("<FocusIn>", lambda _e, which=side: setattr(self, "active_side", which))
+        entry.bind("<FocusIn>", lambda _e, which=side: self._activate_side(which))
         entry.bind("<KeyPress>", lambda event, which=side: self._amount_keypress(event, which))
         entry.bind("<Return>", lambda _e, which=side: self.convert_from(which))
         entry.bind("<KP_Enter>", lambda _e, which=side: self.convert_from(which))
@@ -1322,12 +1467,280 @@ class DualConverterPage(tk.Frame):
             self.reference_amount_value = value
             self.reference_amount_var.set(self._format(value))
             self.update_table(self.service.snapshot)
+            self._save_page_state()
         except CalculationError as exc:
             self.reference_amount_var.set(self._format(self.reference_amount_value))
             self.rate_var.set(f"参考币数额输入有误：{exc}")
         return "break"
 
+    def _page_state(self) -> dict[str, object]:
+        variables = {"a": self.amount_a, "b": self.amount_b, "c": self.amount_c}
+        input_amounts = ["", "", ""]
+        input_amounts[{"a": 0, "b": 1, "c": 2}[self.active_side]] = variables[self.active_side].get()[:128]
+        current_codes = [
+            self._code(self.currency_a.get()),
+            self._code(self.currency_b.get()),
+            self._code(self.currency_c.get()),
+        ]
+        if len(self.restored_codes) == 3:
+            current_codes = [pending or current for pending, current in zip(self.restored_codes, current_codes)]
+        return {
+            "currencies": current_codes,
+            "amounts": input_amounts,
+            "active_side": self.active_side,
+            "table_base": self.restored_table_base or self._code(self.table_base_var.get()),
+            "reference_amount": self.reference_amount_var.get()[:80],
+            "mode": self.exchange_mode if self.mode == "crypto" else "market",
+            "provider": self.c2c_provider if self.mode == "crypto" else "auto",
+            "payment_method": self.c2c_payment_method if self.mode == "crypto" else "",
+            "favorites": sorted(self.favorite_codes),
+            "pinned": list(self.pinned_codes),
+        }
+
+    def _save_page_state(self) -> None:
+        callback = getattr(self, "state_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback(self._page_state())
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return
+
+    def _advance_conversion_generation(self) -> int:
+        generation = int(getattr(self, "conversion_generation", 0)) + 1
+        self.conversion_generation = generation
+        results = getattr(self, "c2c_edge_results", None)
+        if isinstance(results, dict):
+            results.clear()
+        pending = getattr(self, "c2c_pending_slots", None)
+        if isinstance(pending, set):
+            pending.clear()
+        return generation
+
+    def _clear_pending_restored_code(self, side: str | None = None) -> None:
+        pending = list(self.restored_codes) if len(self.restored_codes) == 3 else ["", "", ""]
+        if side is None:
+            pending = ["", "", ""]
+        else:
+            index = {"a": 0, "b": 1, "c": 2}.get(side)
+            if index is not None:
+                pending[index] = ""
+        self.restored_codes = tuple(pending) if any(pending) else ()
+
+    def _activate_side(self, side: str) -> None:
+        if side not in {"a", "b", "c"} or getattr(self, "active_side", "a") == side:
+            return
+        self.active_side = side
+        self._advance_conversion_generation()
+        self._crypto_payment_context_changed()
+        self._save_page_state()
+
+    def _crypto_payment_context_changed(self) -> None:
+        if getattr(self, "mode", "fiat") != "crypto":
+            return
+        self.c2c_payment_method = ""
+        self.crypto_payment_generation += 1
+        self._refresh_crypto_payment_options()
+
+    def flush_state(self) -> None:
+        self._save_page_state()
+
+    def on_show(self) -> None:
+        self.visible = True
+        if self.mode == "crypto":
+            self._refresh_crypto_payment_options()
+        if self.current_snapshot is not None:
+            self.convert_from(self.active_side)
+
+    def on_hide(self) -> None:
+        self.visible = False
+        self._advance_conversion_generation()
+        self._save_page_state()
+
+    def _update_crypto_control_states(self) -> None:
+        if self.mode != "crypto" or self.provider_combo is None or self.payment_combo is None:
+            return
+        enabled = self.exchange_mode == "c2c"
+        self.provider_combo.configure(state="readonly" if enabled else "disabled")
+        self.payment_combo.configure(
+            state="readonly" if enabled and self.payment_supported_fiat else "disabled"
+        )
+
+    def _crypto_mode_changed(self, _event: tk.Event | None = None) -> None:
+        self.exchange_mode = "c2c" if self.mode_var.get() == "C2C 按金额" else "market"
+        self._advance_conversion_generation()
+        self._update_crypto_control_states()
+        self._refresh_crypto_payment_options()
+        self._save_page_state()
+        self.convert_from(self.active_side)
+
+    def _crypto_provider_changed(self, _event: tk.Event | None = None) -> None:
+        self.c2c_provider = PROVIDER_BY_LABEL.get(self.provider_var.get(), "auto")
+        self.c2c_payment_method = ""
+        self._advance_conversion_generation()
+        self.crypto_payment_generation += 1
+        self._refresh_crypto_payment_options()
+        self._save_page_state()
+        self.convert_from(self.active_side)
+
+    def _crypto_payment_changed(self, _event: tk.Event | None = None) -> None:
+        self.c2c_payment_method = self.payment_by_label.get(self.payment_var.get(), "")
+        self._advance_conversion_generation()
+        self._save_page_state()
+        self.convert_from(self.active_side)
+
+    def _refresh_crypto_payment_options(self) -> None:
+        if self.mode != "crypto" or self.payment_combo is None:
+            return
+        fiat = ""
+        if self.current_snapshot is not None:
+            codes = [self._code(display) for display in (self.currency_a.get(), self.currency_b.get(), self.currency_c.get())]
+            fiats = [code for code in codes if self.current_snapshot.kinds.get(code) == "fiat"]
+            active_code = codes[{"a": 0, "b": 1, "c": 2}.get(self.active_side, 0)]
+            if self.current_snapshot.kinds.get(active_code) == "fiat":
+                fiat = active_code
+            elif len(fiats) == 1:
+                fiat = fiats[0]
+        self.payment_supported_fiat = fiat
+        if not fiat:
+            self.c2c_payment_method = ""
+        key = (self.c2c_provider, fiat)
+        options = self.payment_cache.get(key, ())
+        if options:
+            self.payment_by_label = {PAYMENT_ALL_LABEL: ""}
+            for identifier, name in options:
+                self.payment_by_label[f"{name} · {identifier}"] = identifier
+            selected = next(
+                (label for label, identifier in self.payment_by_label.items() if identifier == self.c2c_payment_method),
+                PAYMENT_ALL_LABEL,
+            )
+        else:
+            self.payment_by_label = {PAYMENT_UNKNOWN_LABEL: ""}
+            selected = PAYMENT_UNKNOWN_LABEL
+        self.payment_combo.configure(values=tuple(self.payment_by_label))
+        self.payment_var.set(selected)
+        self._update_crypto_control_states()
+        request = (key[0], key[1], self.crypto_payment_generation)
+        if (
+            self.visible
+            and self.exchange_mode == "c2c"
+            and self.coordinator is not None
+            and fiat
+            and key not in self.payment_cache
+            and request != self.payment_request
+        ):
+            self.payment_request = request
+            self.payment_bridge.expect()
+
+            def worker() -> None:
+                loaded = self.coordinator.payment_method_options(key[0], key[1])
+                self.payment_bridge.deliver(key[0], key[1], request[2], loaded)
+
+            threading.Thread(target=worker, daemon=True, name="crypto-payment-methods").start()
+
+    def _finish_crypto_payment_options(
+        self,
+        provider: object,
+        fiat: object,
+        generation: object,
+        options: object,
+    ) -> None:
+        request = (str(provider), str(fiat), int(generation))
+        if self.payment_request == request:
+            self.payment_request = None
+        if request[0] != self.c2c_provider or request[2] != self.crypto_payment_generation:
+            return
+        cleaned: list[tuple[str, str]] = []
+        for item in tuple(options) if isinstance(options, (tuple, list)) else ():
+            if not isinstance(item, (tuple, list)) or len(item) < 2:
+                continue
+            identifier = str(item[0]).strip()
+            name = str(item[1] or identifier).strip()[:80]
+            if identifier and identifier not in {row[0] for row in cleaned}:
+                cleaned.append((identifier, name))
+        self.payment_cache[(request[0], request[1])] = tuple(cleaned)
+        if self.c2c_payment_method and self.c2c_payment_method not in {item[0] for item in cleaned}:
+            self.c2c_payment_method = ""
+            self._advance_conversion_generation()
+            self._save_page_state()
+            self.convert_from(self.active_side)
+        self._refresh_crypto_payment_options()
+
+    def _start_crypto_quote(self, job: C2CQuoteJob) -> None:
+        if self.coordinator is None or not self.visible:
+            return
+        self.conversion_bridge.expect()
+
+        def worker() -> None:
+            try:
+                quote = self.coordinator.execute_job(job)
+                self.conversion_bridge.deliver(job, quote, None)
+            except Exception as exc:
+                self.conversion_bridge.deliver(job, None, exc)
+
+        threading.Thread(target=worker, daemon=True, name=f"crypto-c2c-{job.slot}").start()
+
+    def _finish_c2c_conversion(self, job: object, quote: object, error: object) -> None:
+        if (
+            not self.visible
+            or self.current_snapshot is None
+            or self.coordinator is None
+            or not isinstance(job, C2CQuoteJob)
+            or job.generation != self.conversion_generation
+        ):
+            return
+        result = self.coordinator.finish_job(
+            job,
+            quote,
+            kinds=self.current_snapshot.kinds,
+            error=error if isinstance(error, BaseException) else None,
+        )
+        if result.generation != self.conversion_generation:
+            return
+        target_side = {0: "a", 1: "b", 2: "c"}.get(result.slot)
+        if target_side is None:
+            return
+        variables = {"a": self.amount_a, "b": self.amount_b, "c": self.amount_c}
+        codes = {
+            "a": self._code(self.currency_a.get()),
+            "b": self._code(self.currency_b.get()),
+            "c": self._code(self.currency_c.get()),
+        }
+        if result.source != codes.get(self.active_side) or result.target != codes.get(target_side):
+            return
+        variables[target_side].set(result.display_value if result.valid else "")
+        self.c2c_pending_slots.discard(result.slot)
+        self.c2c_edge_results[result.slot] = result
+        self._render_crypto_c2c_status()
+
+    def _render_crypto_c2c_status(self) -> None:
+        codes = {
+            "a": self._code(self.currency_a.get()),
+            "b": self._code(self.currency_b.get()),
+            "c": self._code(self.currency_c.get()),
+        }
+        rows: list[str] = []
+        for slot, side in ((0, "a"), (1, "b"), (2, "c")):
+            if side == self.active_side:
+                continue
+            result = self.c2c_edge_results.get(slot)
+            if result is None:
+                if slot in self.c2c_pending_slots:
+                    rows.append(f"{codes.get(side, side.upper())}：正在获取 C2C 本金额匹配价")
+                continue
+            detail = "；".join(result.details[:1])
+            rows.append(
+                f"{result.target}：{result.status}" + (f"（{detail}）" if detail else "")
+            )
+        if self.c2c_pending_slots:
+            rows.append("最低展示价不会冒充本金额可成交价")
+        self.rate_var.set("\n".join(rows) or "C2C 按金额换算")
+
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool = False, animated: bool = False) -> None:
+        self.current_snapshot = snapshot
+        self.current_snapshot_from_cache = bool(from_cache)
+        self.crypto_payment_generation += 1
+        desired_codes = self.restored_codes if len(self.restored_codes) == 3 else ("", "", "")
         old_a = self._code(self.currency_a.get())
         old_b = self._code(self.currency_b.get())
         old_c = self._code(self.currency_c.get())
@@ -1351,20 +1764,29 @@ class DualConverterPage(tk.Frame):
         self.table_base_selector.set_values(fiat_values)
         self.search_selector.set_values(fiat_values if self.mode == "fiat" else crypto_values)
         converter_codes = fiats if self.mode == "fiat" else fiats + cryptos
-        default_a = old_a if old_a in converter_codes else ("CNY" if "CNY" in converter_codes else converter_codes[0] if converter_codes else "")
+        default_a = desired_codes[0] if desired_codes[0] in converter_codes else old_a if old_a in converter_codes else ("CNY" if "CNY" in converter_codes else converter_codes[0] if converter_codes else "")
         candidates_b = converter_codes
         preferred_b = "USD" if self.mode == "fiat" else "BTC"
-        default_b = old_b if old_b in candidates_b else (preferred_b if preferred_b in candidates_b else candidates_b[0] if candidates_b else "")
+        default_b = desired_codes[1] if desired_codes[1] in candidates_b else old_b if old_b in candidates_b else (preferred_b if preferred_b in candidates_b else candidates_b[0] if candidates_b else "")
         preferred_c = "EUR" if self.mode == "fiat" else "ETH"
-        default_c = old_c if old_c in converter_codes else (preferred_c if preferred_c in converter_codes else converter_codes[0] if converter_codes else "")
-        default_table_base = old_table_base if old_table_base in fiats else ("CNY" if "CNY" in fiats else fiats[0] if fiats else "")
+        default_c = desired_codes[2] if desired_codes[2] in converter_codes else old_c if old_c in converter_codes else (preferred_c if preferred_c in converter_codes else converter_codes[0] if converter_codes else "")
+        default_table_base = self.restored_table_base if self.restored_table_base in fiats else old_table_base if old_table_base in fiats else ("CNY" if "CNY" in fiats else fiats[0] if fiats else "")
         self.combo_a.set(self.code_to_display.get(default_a, ""))
         self.combo_b.set(self.code_to_display.get(default_b, ""))
         self.combo_c.set(self.code_to_display.get(default_c, ""))
         self.table_base_selector.set(self.code_to_display.get(default_table_base, ""))
+        pending_codes = tuple(
+            desired if desired and desired not in converter_codes else ""
+            for desired in desired_codes
+        )
+        self.restored_codes = pending_codes if any(pending_codes) else ()
+        if self.restored_table_base in fiats:
+            self.restored_table_base = ""
         self.refresh_stamp_var.set(f"最新刷新：{self.timestamp_formatter(snapshot.fetched_at)}")
         self.update_table(snapshot, animate=animated)
+        self._refresh_crypto_payment_options()
         self.convert_from(self.active_side)
+        self._save_page_state()
         self.refreshing = False
         if self.spinner_job:
             try:
@@ -1420,17 +1842,67 @@ class DualConverterPage(tk.Frame):
         }
         input_var = variables[side]
         from_code = codes[side]
+        previous_active_side = getattr(self, "active_side", side)
         text = normalize_amount_input(input_var.get()).strip()
+        generation = self._advance_conversion_generation()
         if not text:
             for other_side, output_var in variables.items():
                 if other_side != side:
                     output_var.set("")
+            self.active_side = side
+            self._save_page_state()
             return
         try:
             value = evaluate_basic_amount(text)
             if not from_code or any(not code for code in codes.values()):
                 raise ValueError
             input_var.set(self._format(value))
+            self.active_side = side
+            if previous_active_side != side:
+                self._crypto_payment_context_changed()
+            amount_text = self._format(value).replace(",", "")
+            if (
+                getattr(self, "mode", "fiat") == "crypto"
+                and self.exchange_mode == "c2c"
+                and self.coordinator is not None
+                and self.current_snapshot is not None
+            ):
+                statuses: list[str] = []
+                jobs: list[C2CQuoteJob] = []
+                for other_side in ("a", "b", "c"):
+                    if other_side == side:
+                        continue
+                    result = self.coordinator.prepare_edge(
+                        slot={"a": 0, "b": 1, "c": 2}[other_side],
+                        generation=generation,
+                        amount=amount_text,
+                        source=from_code,
+                        target=codes[other_side],
+                        kinds=self.current_snapshot.kinds,
+                        mode="c2c",
+                        provider=self.c2c_provider,
+                        payment_method=self.c2c_payment_method,
+                        from_cache=bool(getattr(self, "current_snapshot_from_cache", False)),
+                    )
+                    if isinstance(result, C2CQuoteJob):
+                        variables[other_side].set("…" if self.visible else "")
+                        jobs.append(result)
+                    else:
+                        variables[other_side].set(result.display_value if result.valid else "")
+                        self.c2c_edge_results[result.slot] = result
+                        statuses.append(f"{codes[other_side]}：{result.status}")
+                if jobs and self.visible:
+                    self.c2c_pending_slots.update(job.slot for job in jobs)
+                    for job in jobs:
+                        self._start_crypto_quote(job)
+                    self._render_crypto_c2c_status()
+                elif jobs:
+                    statuses.append("页面打开后获取 C2C 报价")
+                    self.rate_var.set("\n".join(statuses))
+                else:
+                    self._render_crypto_c2c_status()
+                self._save_page_state()
+                return
             unit_texts: list[str] = []
             for other_side in ("a", "b", "c"):
                 if other_side == side:
@@ -1440,8 +1912,8 @@ class DualConverterPage(tk.Frame):
                 variables[other_side].set(self._format(result))
                 unit = self.service.convert(1, from_code, to_code)
                 unit_texts.append(f"{self._format(unit)} {to_code}")
-            self.active_side = side
             self.rate_var.set(f"1 {from_code} = {'  =  '.join(unit_texts)}\n已按 {side.upper()} 端输入同步换算另外两端")
+            self._save_page_state()
         except CalculationError as exc:
             self.rate_var.set(f"{side.upper()} 端金额输入有误：{exc}")
         except (ValueError, KeyError):
@@ -1450,12 +1922,19 @@ class DualConverterPage(tk.Frame):
     def selection_changed(self, side: str) -> None:
         # Changing a target currency must not turn its previously calculated
         # amount into the new source. The last amount field the user edited wins.
+        self._clear_pending_restored_code(side)
+        self._advance_conversion_generation()
+        self._crypto_payment_context_changed()
+        self._save_page_state()
         self.convert_from(self.active_side)
 
     def table_base_changed(self) -> None:
+        self.restored_table_base = ""
         self.update_table(self.service.snapshot)
+        self._save_page_state()
 
     def swap_pair(self, left: str, right: str) -> None:
+        self._clear_pending_restored_code()
         variables = {"a": self.amount_a, "b": self.amount_b, "c": self.amount_c}
         combos = {"a": self.combo_a, "b": self.combo_b, "c": self.combo_c}
         currency_values = {
@@ -1470,9 +1949,12 @@ class DualConverterPage(tk.Frame):
             self.active_side = right
         elif self.active_side == right:
             self.active_side = left
+        self._crypto_payment_context_changed()
+        self._save_page_state()
         self.convert_from(self.active_side)
 
     def rotate(self) -> None:
+        self._clear_pending_restored_code()
         displays = (self.currency_a.get(), self.currency_b.get(), self.currency_c.get())
         values = (self.amount_a.get(), self.amount_b.get(), self.amount_c.get())
         self.combo_a.set(displays[2])
@@ -1482,6 +1964,8 @@ class DualConverterPage(tk.Frame):
         self.amount_b.set(values[0])
         self.amount_c.set(values[1])
         self.active_side = {"a": "b", "b": "c", "c": "a"}.get(self.active_side, "a")
+        self._crypto_payment_context_changed()
+        self._save_page_state()
         self.convert_from(self.active_side)
 
     def update_table(self, snapshot: RateSnapshot, animate: bool = False) -> None:
@@ -1717,6 +2201,7 @@ class DualConverterPage(tk.Frame):
 
     def _save_preferences(self) -> None:
         self.preference_callback(self.mode, sorted(self.favorite_codes), list(self.pinned_codes))
+        self._save_page_state()
 
     def toggle_favorite(self) -> None:
         code = self._selected_code()
@@ -1756,8 +2241,10 @@ class DualConverterPage(tk.Frame):
         code = self.table_item_codes.get(selected[0], str(self.table.item(selected[0], "values")[0]))
         if code in self.code_to_display:
             target_side = {"a": "b", "b": "c", "c": "a"}.get(self.active_side, "b")
+            self._clear_pending_restored_code(target_side)
             target_combo = {"a": self.combo_a, "b": self.combo_b, "c": self.combo_c}[target_side]
             target_combo.set(self.code_to_display[code])
+            self._crypto_payment_context_changed()
             self.convert_from(self.active_side)
 
     def _destroy_jobs(self, event: tk.Event) -> None:
@@ -1766,7 +2253,11 @@ class DualConverterPage(tk.Frame):
         self.refreshing = False
         self.render_generation += 1
         self.action_fade_generation += 1
+        self.visible = False
+        self._advance_conversion_generation()
         self.after_jobs.cancel_all()
+        self.conversion_bridge.close()
+        self.payment_bridge.close()
         for attr in ("spinner_job", "render_job"):
             job = getattr(self, attr, None)
             if job is not None:
@@ -1878,6 +2369,8 @@ class MarketPage(tk.Frame):
         timestamp_formatter: Callable[[str], str],
         mode: str = "crypto",
         chart_timestamp_formatter: Callable[[int], str] | None = None,
+        page_state: Mapping[str, object] | None = None,
+        state_callback: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         super().__init__(master, bg=COLORS["bg"])
         self.service = service
@@ -1885,17 +2378,31 @@ class MarketPage(tk.Frame):
         self.timestamp_formatter = timestamp_formatter
         self.chart_timestamp_formatter = chart_timestamp_formatter
         self.mode = mode
-        self.current_code = "USD" if mode == "fiat" else "BTC"
-        self.current_days = 7
+        restored = dict(page_state or {})
+        default_code = "USD" if mode == "fiat" else "BTC"
+        restored_code = str(restored.get("selected_code", default_code)).strip().upper()
+        self.restored_code = restored_code if 1 <= len(restored_code) <= 16 else default_code
+        self.current_code = self.restored_code
+        restored_days = restored.get("days", 7)
+        self.current_days = restored_days if isinstance(restored_days, int) and restored_days in {1, 7, 30, 90} else 7
+        restored_quote = str(restored.get("quote", "CNY")).strip().upper()
+        self.restored_quote = restored_quote if 1 <= len(restored_quote) <= 16 else "CNY"
+        self.state_callback = state_callback or (lambda _state: None)
+        self.visible = False
         self.fiat_var = tk.StringVar()
-        self.reference_amount_var = tk.StringVar(value="1")
-        self.reference_amount_value = 1.0
+        restored_reference = str(restored.get("reference_amount", "1"))[:80]
+        self.reference_amount_var = tk.StringVar(value=restored_reference)
+        try:
+            self.reference_amount_value = evaluate_basic_amount(restored_reference)
+        except CalculationError:
+            self.reference_amount_value = 1.0
+            self.reference_amount_var.set("1")
         self.status_var = tk.StringVar(value=(
             "全球货币周期趋势与多币种计价将在这里同步呈现。" if mode == "fiat" else
             "虚拟币批量行情、周期趋势与多币种计价将在这里同步呈现。"
         ))
         self.refresh_stamp_var = tk.StringVar(value="最新刷新：等待联网")
-        self.market_search_var = tk.StringVar()
+        self.market_search_var = tk.StringVar(value=str(restored.get("search", ""))[:128])
         self.price_var = tk.StringVar(value="—")
         self.change_var = tk.StringVar(value="—")
         self.range_var = tk.StringVar(value="最高 —   最低 —")
@@ -1951,7 +2458,7 @@ class MarketPage(tk.Frame):
         tk.Label(watch_header, text=list_title, bg=COLORS["card"], fg=COLORS["text"], font=(FONT, 14, "bold")).grid(row=0, column=0, sticky="w")
         AppButton(watch_header, "默认顺序", self.reset_watch_order, "soft_accent", 8).grid(row=0, column=1, padx=(5, 0), ipady=4)
         self.market_search_selector = SearchSelect(
-            watch_header, self.market_search_var, input_callback=lambda _value: self._render_watch(False),
+            watch_header, self.market_search_var, input_callback=self._market_search_changed,
             allow_free_text=True, width=16, font_size=9, max_rows=7,
         )
         self.market_search_selector.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(7, 2))
@@ -2054,7 +2561,45 @@ class MarketPage(tk.Frame):
         return f"{value:.6f}".rstrip("0").rstrip(".")
 
     def _fiat_code(self) -> str:
-        return self.fiat_display_to_code.get(self.fiat_var.get(), "CNY")
+        return self.fiat_display_to_code.get(self.fiat_var.get(), self.restored_quote or "CNY")
+
+    def _page_state(self) -> dict[str, object]:
+        return {
+            "selected_code": self.restored_code or self.current_code,
+            "days": self.current_days,
+            "quote": self.restored_quote or self._fiat_code(),
+            "reference_amount": self.reference_amount_var.get()[:80],
+            "search": self.market_search_var.get()[:128],
+        }
+
+    def _save_page_state(self) -> None:
+        callback = getattr(self, "state_callback", None)
+        if callable(callback):
+            callback(self._page_state())
+
+    def flush_state(self) -> None:
+        self._save_page_state()
+
+    def on_show(self) -> None:
+        self.visible = True
+        if self.service.snapshot.rates:
+            raw_matches = (
+                bool(self.raw_points)
+                and self.raw_points_code == self.current_code
+                and self.raw_points_days == self.current_days
+            )
+            if raw_matches:
+                self.rerender_currency()
+            elif not self.loading:
+                self.load_chart()
+
+    def on_hide(self) -> None:
+        self.visible = False
+        self._save_page_state()
+
+    def _market_search_changed(self, _value: str) -> None:
+        self._render_watch(False)
+        self._save_page_state()
 
     @staticmethod
     def _fiat_watch_change(snapshot: RateSnapshot, code: str, quote: str) -> float | None:
@@ -2078,6 +2623,7 @@ class MarketPage(tk.Frame):
             self.reference_amount_value = value
             self.reference_amount_var.set(DualConverterPage._format(value))
             self.rerender_currency()
+            self._save_page_state()
         except CalculationError as exc:
             self.reference_amount_var.set(DualConverterPage._format(self.reference_amount_value))
             self.status_var.set(f"参考数额输入有误：{exc}")
@@ -2109,16 +2655,21 @@ class MarketPage(tk.Frame):
         ]
         self.market_search_selector.set_values(asset_values)
         asset_codes = [code for code in snapshot.rates if snapshot.kinds.get(code) == asset_kind]
+        if self.restored_code in asset_codes:
+            self.current_code = self.restored_code
+            self.restored_code = ""
         if self.current_code not in asset_codes and asset_codes:
             self.current_code = asset_codes[0]
             name = snapshot.names.get(self.current_code, self.current_code)
             if self.mode == "crypto":
                 name = crypto_display_name(self.current_code, name)
             self.coin_label.configure(text=f"{self.current_code} / {name}")
-        target_fiat = old_fiat if old_fiat in fiats else ("CNY" if "CNY" in fiats else fiats[0] if fiats else "")
+        target_fiat = self.restored_quote if self.restored_quote in fiats else old_fiat if old_fiat in fiats else ("CNY" if "CNY" in fiats else fiats[0] if fiats else "")
         for display, code in self.fiat_display_to_code.items():
             if code == target_fiat:
                 self.fiat_combo.set(display)
+                if code == self.restored_quote:
+                    self.restored_quote = ""
                 break
         self._refresh_watchlist(snapshot, animated)
         self.refresh_stamp_var.set(f"最新刷新：{self.timestamp_formatter(snapshot.fetched_at)}")
@@ -2277,20 +2828,25 @@ class MarketPage(tk.Frame):
         if not selected:
             return
         self.current_code = str(self.watch_table.item(selected[0], "values")[0])
+        self.restored_code = ""
         name = self.service.snapshot.names.get(self.current_code, self.current_code)
         if self.mode == "fiat":
             name = fiat_display_name(self.current_code, name)
         else:
             name = crypto_display_name(self.current_code, name)
         self.coin_label.configure(text=f"{self.current_code} / {name}")
+        self._save_page_state()
         self.load_chart()
 
     def change_days(self, days: int) -> None:
         self.current_days = days
         self._highlight_days()
+        self._save_page_state()
         self.load_chart()
 
     def change_quote(self, _value: str | None = None) -> None:
+        self.restored_quote = ""
+        self._save_page_state()
         if self.mode != "fiat":
             self.rerender_currency()
             return
@@ -2479,7 +3035,7 @@ class HistoryPanel(tk.Frame):
 
 class SettingsPage(tk.Frame):
     PAGE_LABELS = {
-        "calculator": "计算器", "fiat": "货币", "fiat_market": "货币行情趋势",
+        "calculator": "计算器", "exchange": "兑换", "fiat": "货币", "fiat_market": "货币行情趋势",
         "crypto": "虚拟币", "market": "虚拟币行情趋势", "settings": "设置",
     }
     CLOSE_LABELS = {"exit": "关闭时退出应用", "minimize": "关闭时最小化"}
@@ -2503,6 +3059,11 @@ class SettingsPage(tk.Frame):
         reset_callback: Callable[[], None],
         open_app_callback: Callable[[], None],
         open_data_callback: Callable[[], None],
+        api_status_getter: Callable[[], str],
+        api_enabled_callback: Callable[[bool], str],
+        api_port_callback: Callable[[int], str],
+        api_token_callback: Callable[[str], str],
+        api_test_callback: Callable[[], str],
         exit_callback: Callable[[], None],
     ) -> None:
         super().__init__(master, bg=COLORS["bg"])
@@ -2520,6 +3081,11 @@ class SettingsPage(tk.Frame):
         self.reset_callback = reset_callback
         self.open_app_callback = open_app_callback
         self.open_data_callback = open_data_callback
+        self.api_status_getter = api_status_getter
+        self.api_enabled_callback = api_enabled_callback
+        self.api_port_callback = api_port_callback
+        self.api_token_callback = api_token_callback
+        self.api_test_callback = api_test_callback
         self.exit_callback = exit_callback
         self.theme_var = tk.StringVar(value=settings.theme)
         self.timezone_var = tk.StringVar()
@@ -2543,6 +3109,12 @@ class SettingsPage(tk.Frame):
         self.cache_size_var = tk.StringVar(value="正在统计…")
         self.app_path_var = tk.StringVar(value=str(portable_dir()))
         self.data_path_var = tk.StringVar(value=str(settings.resolved_data_dir()))
+        self.api_enabled_var = tk.BooleanVar(value=bool(settings.local_api.get("enabled", False)))
+        self.api_port_var = tk.StringVar(value=str(settings.local_api.get("port", 17890)))
+        self.api_status_var = tk.StringVar(value=api_status_getter())
+        self.api_token_once_var = tk.StringVar(value="")
+        self.api_results = TkResultBridge(self, self._finish_api_action)
+        self.api_action_busy = False
         self.zones = timezone_names()
         self.zone_infos = {zone: ZoneInfo(zone) for zone in self.zones}
         self.zone_display_to_name: dict[str, str] = {}
@@ -2635,7 +3207,49 @@ class SettingsPage(tk.Frame):
         keep = tk.Checkbutton(storage_content, text="应用与相关数据全部放在同一文件夹", variable=self.keep_var, command=lambda: self.data_callback(self.keep_var.get()), **self._check_style())
         keep.grid(row=6, column=0, columnspan=3, sticky="w", padx=20, pady=(2, 16))
 
-        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 4, 0, columnspan=2)
+        api = self._card(body, "API 接入", "供本机微信、QQ、Telegram 等机器人桥接；曜衡本身只监听回环地址", 4, 0, columnspan=2)
+        api_row = tk.Frame(api, bg=COLORS["card"])
+        api_row.pack(fill="x", padx=20, pady=(10, 6))
+        tk.Checkbutton(
+            api_row, text="启用本机 API", variable=self.api_enabled_var,
+            command=self._toggle_api, **self._check_style(),
+        ).pack(side="left", padx=(0, 12))
+        tk.Label(api_row, text="固定地址  127.0.0.1", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold")).pack(side="left")
+        port_box = tk.Frame(api_row, bg=COLORS["card"])
+        port_box.pack(side="left", padx=12)
+        tk.Label(port_box, text="端口", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).pack(anchor="w")
+        self.api_port_entry = tk.Entry(
+            port_box, textvariable=self.api_port_var, width=9, bg=COLORS["card_alt"], fg=COLORS["text"],
+            insertbackground=COLORS["text"], selectbackground=COLORS["selection"],
+            selectforeground=COLORS["selection_text"], bd=0, highlightthickness=1,
+            highlightbackground=COLORS["line"], highlightcolor=COLORS["accent"], font=("Segoe UI", 10, "bold"),
+        )
+        self.api_port_entry.pack(ipady=5)
+        self.api_port_entry.bind("<Return>", self._commit_api_port)
+        self.api_port_entry.bind("<KP_Enter>", self._commit_api_port)
+        self.api_port_entry.bind("<FocusOut>", self._commit_api_port)
+        AppButton(api_row, "生成令牌", lambda: self._issue_api_token("generate"), "outline", 9).pack(side="left", padx=4, ipady=5)
+        AppButton(api_row, "轮换令牌", lambda: self._issue_api_token("rotate"), "outline", 9).pack(side="left", padx=4, ipady=5)
+        AppButton(api_row, "连接测试", self._test_api_connection, "ghost", 9).pack(side="left", padx=4, ipady=5)
+        token_row = tk.Frame(api, bg=COLORS["card"])
+        token_row.pack(fill="x", padx=20, pady=(2, 6))
+        tk.Label(token_row, text="一次性令牌", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).pack(side="left")
+        tk.Entry(
+            token_row, textvariable=self.api_token_once_var, state="readonly", readonlybackground=COLORS["card_alt"],
+            fg=COLORS["text"], relief="flat", bd=0, font=("Consolas", 9),
+        ).pack(side="left", expand=True, fill="x", padx=10, ipady=6)
+        AppButton(token_row, "复制", self._copy_api_token, "outline", 8).pack(side="left", ipady=4)
+        tk.Label(
+            api, textvariable=self.api_status_var, bg=COLORS["accent_dark"], fg=COLORS["accent"],
+            font=(FONT, 9, "bold"), anchor="w", justify="left", padx=12, pady=8,
+        ).pack(fill="x", padx=20, pady=(0, 5))
+        tk.Label(
+            api,
+            text="明文令牌只在生成或轮换当次显示，请立即保存。支持 /health、/v1/capabilities、/v1/calculate、/v1/convert、/v1/command；不包含下单接口。",
+            bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8), wraplength=960, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 5, 0, columnspan=2)
         tools = tk.Frame(cache, bg=COLORS["card"])
         tools.pack(fill="x", padx=20, pady=(10, 8))
         tk.Label(tools, textvariable=self.cache_size_var, bg=COLORS["card_alt"], fg=COLORS["accent"], font=(FONT, 9, "bold"), padx=12, pady=8).pack(side="left")
@@ -2725,6 +3339,104 @@ class SettingsPage(tk.Frame):
         self._save(key, value)
         return "break"
 
+    def refresh_api_status(self) -> None:
+        self.api_status_var.set(self.api_status_getter())
+
+    def _toggle_api(self) -> None:
+        status = self.api_enabled_callback(self.api_enabled_var.get())
+        self.api_enabled_var.set(bool(self.settings.local_api.get("enabled", False)))
+        self.api_status_var.set(status)
+
+    def _commit_api_port(self, _event: tk.Event | None = None) -> str:
+        try:
+            port = int(self.api_port_var.get().strip())
+        except ValueError:
+            port = int(self.settings.local_api.get("port", 17890))
+            self.api_port_var.set(str(port))
+            self.api_status_var.set("端口必须是 1–65535 的整数，已恢复原设置。")
+            return "break"
+        if not 1 <= port <= 65535:
+            port = int(self.settings.local_api.get("port", 17890))
+            self.api_port_var.set(str(port))
+            self.api_status_var.set("端口必须在 1–65535 之间，已恢复原设置。")
+            return "break"
+        self.api_port_var.set(str(port))
+        self.api_status_var.set(self.api_port_callback(port))
+        return "break"
+
+    def _issue_api_token(self, action: str) -> None:
+        if self.api_action_busy:
+            self.api_status_var.set("已有 API 操作正在进行，请稍候。")
+            return
+        self.api_action_busy = True
+        self.api_token_once_var.set("")
+        self.api_status_var.set("正在安全生成令牌…")
+        self.api_results.expect()
+
+        def worker() -> None:
+            try:
+                self.api_results.deliver("token", self.api_token_callback(action), None)
+            except Exception as exc:
+                self.api_results.deliver("token", None, exc)
+
+        threading.Thread(target=worker, daemon=True, name="local-api-token").start()
+
+    def _copy_api_token(self) -> None:
+        token = self.api_token_once_var.get()
+        if not token:
+            self.api_status_var.set("没有可复制的一次性令牌，请先生成或轮换。")
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(token)
+            self.api_status_var.set("令牌已复制到剪贴板；请保存到可信密码管理器。")
+        except tk.TclError:
+            self.api_status_var.set("无法复制令牌，请手动选择保存。")
+
+    def _test_api_connection(self) -> None:
+        if self.api_action_busy:
+            self.api_status_var.set("已有 API 操作正在进行，请稍候。")
+            return
+        self.api_action_busy = True
+        self.api_status_var.set("正在测试本机 API 连接…")
+        self.api_results.expect()
+
+        def worker() -> None:
+            try:
+                self.api_results.deliver("test", self.api_test_callback(), None)
+            except Exception as exc:
+                self.api_results.deliver("test", None, exc)
+
+        threading.Thread(target=worker, daemon=True, name="local-api-health-test").start()
+
+    def _finish_api_action(self, action: object, value: object, error: object) -> None:
+        self.api_action_busy = False
+        if error is not None:
+            self.api_token_once_var.set("")
+            if action == "token" and isinstance(error, SecretAlreadyExistsError):
+                self.api_status_var.set("已有本机 API 令牌；如需新令牌，请使用“轮换令牌”。")
+            else:
+                self.api_status_var.set(
+                    "令牌操作失败；未显示或保存任何明文。"
+                    if action == "token" else "连接测试失败；本机 API 未确认可用。"
+                )
+            return
+        if action == "token":
+            self.api_token_once_var.set(str(value or ""))
+            self.api_status_var.set(self.api_status_getter() + "；新令牌仅本次显示，请立即保存。")
+        else:
+            self.api_status_var.set(str(value or "连接测试未返回状态。"))
+
+    def on_hide(self) -> None:
+        # A plaintext token must not remain visible after leaving Settings.
+        self.api_token_once_var.set("")
+
+    def on_show(self) -> None:
+        self.refresh_api_status()
+
+    def flush_state(self) -> None:
+        self._commit_api_port()
+
     def _set_theme(self, theme: str) -> None:
         self.theme_var.set(theme)
         self.theme_callback(theme)
@@ -2780,6 +3492,9 @@ class SettingsPage(tk.Frame):
             except tk.TclError:
                 pass
             self.timezone_job = None
+        if event.widget is self:
+            self.api_token_once_var.set("")
+            self.api_results.close()
 
     def _bind_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -2812,7 +3527,7 @@ class YaohengApp:
         COLORS.clear()
         COLORS.update(THEMES[self.settings.theme])
         self.root = tk.Tk()
-        self.root.title("曜衡")
+        self.root.title(f"曜衡 {APP_VERSION}")
         geometry = self.settings.window_geometry if self.settings.remember_window_geometry else "1380x820"
         try:
             self.root.geometry(geometry)
@@ -2840,6 +3555,19 @@ class YaohengApp:
         self.window_icon_handles = set_windows_window_icon(self.root, icon)
         self.service = RateService(self.settings.resolved_data_dir())
         self.service.set_cache_limit(self.settings.cache_limit_mb)
+        self.c2c_service = AppC2CService(self.service)
+        self.exchange_coordinator = ExchangeCoordinator(self.service, self.c2c_service)
+        self.local_api_command = CommandService(
+            conversion_service=self.service,
+            c2c_service=self.c2c_service,
+        )
+        self.api_security_warnings: list[str] = []
+        self.local_api_last_error = ""
+        self.secret_store = SecretStore(
+            self.settings_store.path.parent / "private" / "local_api_token.json",
+            warning_callback=self._record_api_security_warning,
+        )
+        self.local_api_server: LocalAPIServer | None = None
         self.pages: dict[str, tk.Frame] = {}
         self.nav_buttons: dict[str, tk.Button] = {}
         self.current_page = "calculator"
@@ -2866,6 +3594,7 @@ class YaohengApp:
         if self.service.snapshot.rates:
             self.apply_snapshot(self.service.snapshot, True)
         self.startup_job = self.root.after(350, lambda: self.refresh_rates("all"))
+        self.api_start_job = self.root.after(150, self._start_local_api_if_enabled)
 
     def _styles(self) -> None:
         style = ttk.Style(self.root)
@@ -2938,7 +3667,7 @@ class YaohengApp:
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
         self.sidebar.grid_columnconfigure(0, weight=1)
-        self.sidebar.grid_rowconfigure(7, weight=1)
+        self.sidebar.grid_rowconfigure(8, weight=1)
         brand = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
         brand.grid(row=0, column=0, sticky="ew", padx=18, pady=(26, 32))
         self.logo_canvas = tk.Canvas(brand, width=42, height=42, bg=COLORS["sidebar"], bd=0, highlightthickness=0)
@@ -2951,6 +3680,7 @@ class YaohengApp:
 
         items = [
             ("calculator", "▦   计算器", 11, 22),
+            ("exchange", "⇄   兑换", 11, 22),
             ("fiat", "¥   货币", 11, 22),
             ("fiat_market", "　　¥⌁  货币行情趋势", 9, 22),
             ("crypto", "₿   虚拟币", 11, 22),
@@ -2967,7 +3697,7 @@ class YaohengApp:
             button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
             self.nav_buttons[key] = button
         footer = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
-        footer.grid(row=8, column=0, sticky="sew", padx=22, pady=20)
+        footer.grid(row=9, column=0, sticky="sew", padx=22, pady=20)
         self.network_button = tk.Button(
             footer, text="●  正在准备联网  ↻", command=self.refresh_rates, anchor="center",
             bg=COLORS["accent_dark"], fg=COLORS["accent"], activebackground=COLORS["card_alt"],
@@ -2998,28 +3728,54 @@ class YaohengApp:
             angle_mode=self.settings.calculator_angle_mode, history_limit=self.settings.history_limit,
             initial_history=history, copy_result_format=self.settings.copy_result_format,
         )
+        self.pages["exchange"] = ExchangePage(
+            content,
+            self.exchange_coordinator,
+            ExchangePageState.from_mapping(self.settings.pages.get("exchange")),
+            self.refresh_rates,
+            lambda state: self.save_page_state("exchange", state),
+            self.format_timestamp,
+            colors=COLORS,
+            font_name=FONT,
+        )
         self.pages["fiat"] = DualConverterPage(
             content, self.service, "fiat", self.refresh_rates, self.format_timestamp,
             self.settings.favorite_fiats, self.settings.pinned_fiats, self.save_currency_preferences,
+            coordinator=self.exchange_coordinator,
+            page_state=self.settings.pages.get("fiat"),
+            state_callback=lambda state: self.save_page_state("fiat", state),
         )
         self.pages["fiat_market"] = MarketPage(
             content, self.service, self.refresh_rates, self.format_timestamp, "fiat",
             self.format_chart_timestamp,
+            page_state=self.settings.pages.get("fiat_market"),
+            state_callback=lambda state: self.save_page_state("fiat_market", state),
         )
         self.pages["crypto"] = DualConverterPage(
             content, self.service, "crypto", self.refresh_rates, self.format_timestamp,
             self.settings.favorite_cryptos, self.settings.pinned_cryptos, self.save_currency_preferences,
+            coordinator=self.exchange_coordinator,
+            page_state=self.settings.pages.get("crypto"),
+            state_callback=lambda state: self.save_page_state("crypto", state),
         )
         self.pages["market"] = MarketPage(
             content, self.service, self.refresh_rates, self.format_timestamp, "crypto",
             self.format_chart_timestamp,
+            page_state=self.settings.pages.get("market"),
+            state_callback=lambda state: self.save_page_state("market", state),
         )
         self.pages["settings"] = SettingsPage(
             content, self.settings, self.set_theme, self.set_timezone, self.set_keep_data_with_app,
             self.save_setting, self.choose_data_directory, self.migrate_application,
             self.service.cache_size_bytes, self.clear_cache, self.export_settings, self.import_settings,
             self.reset_settings, lambda: self.open_folder(portable_dir()),
-            lambda: self.open_folder(self.settings.resolved_data_dir()), self.force_exit,
+            lambda: self.open_folder(self.settings.resolved_data_dir()),
+            self.local_api_status,
+            self.set_local_api_enabled,
+            self.set_local_api_port,
+            self.issue_local_api_token,
+            self.test_local_api_connection,
+            self.force_exit,
         )
         for page in self.pages.values():
             page.grid(row=0, column=0, sticky="nsew")
@@ -3055,11 +3811,18 @@ class YaohengApp:
             active.close()
         if page != "calculator" and self.history_open:
             self.toggle_history()
+        changed = self.current_page != page
+        previous = self.pages.get(self.current_page)
+        if changed and hasattr(previous, "on_hide"):
+            previous.on_hide()  # type: ignore[attr-defined]
         self.current_page = page
         if self.settings.remember_last_page:
             self.settings.last_page = page
             self._persist_settings(notify=False)
         self.pages[page].tkraise()
+        current = self.pages[page]
+        if changed and hasattr(current, "on_show"):
+            current.on_show()  # type: ignore[attr-defined]
         for key, button in self.nav_buttons.items():
             active = key == page
             button.configure(bg=COLORS["accent_dark"] if active else COLORS["sidebar"], fg=COLORS["accent"] if active else COLORS["muted"])
@@ -3092,7 +3855,7 @@ class YaohengApp:
         self.network_button.configure(text="●  正在重新连接…", state="disabled")
         scope_text = "货币" if section == "fiat" else "虚拟币" if section == "crypto" else "汇率与行情"
         self._set_network_status(None, f"正在获取最新{scope_text}")
-        page_keys = ("fiat", "fiat_market") if section == "fiat" else ("crypto", "market") if section == "crypto" else ("fiat", "fiat_market", "crypto", "market")
+        page_keys = ("exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "crypto", "market") if section == "crypto" else ("exchange", "fiat", "fiat_market", "crypto", "market")
         for key in page_keys:
             page = self.pages.get(key)
             if hasattr(page, "begin_refresh"):
@@ -3147,7 +3910,7 @@ class YaohengApp:
             if self.service.snapshot.rates:
                 self.apply_snapshot(self.service.snapshot, True, animated=True, section=section)
             else:
-                page_keys = ("fiat", "fiat_market") if section == "fiat" else ("crypto", "market") if section == "crypto" else ("fiat", "fiat_market", "crypto", "market")
+                page_keys = ("exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "crypto", "market") if section == "crypto" else ("exchange", "fiat", "fiat_market", "crypto", "market")
                 for key in page_keys:
                     page = self.pages.get(key)
                     if hasattr(page, "finish_refresh_failure"):
@@ -3206,12 +3969,14 @@ class YaohengApp:
 
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
         keys = (
-            ("fiat", "fiat_market", "crypto", "market") if section == "fiat" else
-            ("crypto", "market") if section == "crypto" else
-            ("fiat", "fiat_market", "crypto", "market")
+            ("exchange", "fiat", "fiat_market", "crypto", "market") if section == "fiat" else
+            ("exchange", "crypto", "market") if section == "crypto" else
+            ("exchange", "fiat", "fiat_market", "crypto", "market")
         )
         for key in keys:
-            page = self.pages[key]
+            page = self.pages.get(key)
+            if page is None:
+                continue
             if isinstance(page, MarketPage):
                 reload_chart = (
                     section == "all"
@@ -3259,6 +4024,11 @@ class YaohengApp:
             page.refresh_display()
 
     def _persist_settings(self, notify: bool = True) -> bool:
+        # Discard an older frozen debounce snapshot; self.settings already
+        # contains the latest page state and is the authoritative final copy.
+        cancel_pending = getattr(self.settings_store, "cancel_pending_save", None)
+        if callable(cancel_pending):
+            cancel_pending()
         saved = self.settings_store.save(self.settings)
         if not saved and notify and not self.persistence_warning_shown:
             self.persistence_warning_shown = True
@@ -3267,6 +4037,12 @@ class YaohengApp:
                 "无法写入应用设置文件；本次更改仅在当前会话有效。请检查应用文件夹权限。",
             )
         return saved
+
+    def save_page_state(self, page: str, state: dict[str, object]) -> None:
+        if page not in {"exchange", "fiat", "crypto", "fiat_market", "market", "settings"}:
+            return
+        self.settings.pages[page] = dict(state)
+        self.settings_store.schedule_save(self.settings)
 
     def save_setting(self, key: str, value: object) -> None:
         if key in AppSettings.__dataclass_fields__:
@@ -3300,12 +4076,198 @@ class YaohengApp:
         else:
             self.settings.favorite_cryptos = favorites
             self.settings.pinned_cryptos = pins
-        self._persist_settings()
+        page_state = dict(self.settings.pages.get(mode, {}))
+        page_state.update({"favorites": list(favorites), "pinned": list(pins)})
+        self.settings.pages[mode] = page_state
+        self.settings_store.schedule_save(self.settings)
 
     def calculator_mode_changed(self, mode: str) -> None:
         self.settings.last_calculator_mode = mode
         if self.settings.remember_calculator_mode:
             self._persist_settings(notify=False)
+
+    def _record_api_security_warning(self, message: str) -> None:
+        text = str(message)[:300]
+        if text and text not in self.api_security_warnings:
+            self.api_security_warnings.append(text)
+
+    def local_api_status(self) -> str:
+        config = self.settings.local_api
+        port = int(config.get("port", 17890))
+        server = self.local_api_server
+        warning = f"；安全警告：{self.api_security_warnings[-1]}" if self.api_security_warnings else ""
+        last_error = f"；最近错误：{self.local_api_last_error}" if self.local_api_last_error else ""
+        if server is not None and server.is_running:
+            return f"运行中：http://127.0.0.1:{server.port}（仅本机）{warning}"
+        try:
+            token_exists = self.secret_store.exists()
+        except SecretStoreError:
+            return f"未运行：令牌校验文件不可用{warning}{last_error}"
+        if bool(config.get("enabled", False)) and not token_exists:
+            return f"已启用但未监听：请先生成一次性令牌{warning}{last_error}"
+        if bool(config.get("enabled", False)):
+            return f"已启用但未运行：检查端口 {port} 或重新启动{warning}{last_error}"
+        return f"已关闭；固定地址 127.0.0.1:{port}，不会监听外网{warning}{last_error}"
+
+    def _start_local_api_if_enabled(self) -> None:
+        self.api_start_job = None
+        if self.exiting or not bool(self.settings.local_api.get("enabled", False)):
+            return
+        try:
+            if not self.secret_store.exists():
+                return
+            self._start_local_api()
+        except LocalAPIPortInUseError:
+            self.local_api_last_error = f"端口 {self.settings.local_api.get('port', 17890)} 已被占用"
+            self.settings.local_api["enabled"] = False
+            self._persist_settings(notify=False)
+        except (LocalAPIError, SecretStoreError):
+            self.local_api_last_error = "启动失败或令牌存储不可用"
+            self.settings.local_api["enabled"] = False
+            self._persist_settings(notify=False)
+        page = self.pages.get("settings")
+        if isinstance(page, SettingsPage):
+            page.api_enabled_var.set(bool(self.settings.local_api.get("enabled", False)))
+            page.refresh_api_status()
+
+    def _start_local_api(self) -> int:
+        if not self.secret_store.exists():
+            raise SecretStoreError("启用本机 API 前必须先生成令牌")
+        # A slot existing is not proof that its verifier is readable.  A
+        # deliberately invalid candidate triggers bounded validation/recovery.
+        self.secret_store.verify("")
+        port = int(self.settings.local_api.get("port", 17890))
+        current = self.local_api_server
+        if current is not None and current.is_running and current.configured_port == port:
+            return current.port
+        if current is not None:
+            current.stop()
+        server = LocalAPIServer(
+            command_service=self.local_api_command,
+            token_verifier=self.secret_store,
+            host="127.0.0.1",
+            port=port,
+        )
+        server.start()
+        self.local_api_server = server
+        self.local_api_last_error = ""
+        return server.port
+
+    def _stop_local_api(self) -> bool:
+        server = self.local_api_server
+        if server is None:
+            return False
+        result = server.stop()
+        if not server.is_running:
+            self.local_api_server = None
+        return result
+
+    def set_local_api_enabled(self, enabled: bool) -> str:
+        enabled = bool(enabled)
+        if not enabled:
+            try:
+                self._stop_local_api()
+            except LocalAPIError:
+                self.local_api_last_error = "停止服务失败，请退出应用后确认端口已释放"
+            self.settings.local_api["enabled"] = False
+            if not self._persist_settings(notify=False):
+                return "API 已在本次会话停止，但设置保存失败；下次启动前请再次确认。"
+            return self.local_api_status()
+        try:
+            if not self.secret_store.exists():
+                self.settings.local_api["enabled"] = True
+                self._persist_settings(notify=False)
+                return "已记录启用选择，但尚未监听：请先生成一次性令牌。"
+            self._start_local_api()
+        except LocalAPIPortInUseError:
+            self.local_api_last_error = f"端口 {self.settings.local_api.get('port', 17890)} 已被占用"
+            self.settings.local_api["enabled"] = False
+            self._persist_settings(notify=False)
+            return f"启用失败：端口 {self.settings.local_api.get('port', 17890)} 已被占用。"
+        except (LocalAPIError, SecretStoreError):
+            self.local_api_last_error = "本机 API 或令牌存储不可用"
+            self.settings.local_api["enabled"] = False
+            self._persist_settings(notify=False)
+            return "启用失败：本机 API 或令牌存储不可用。"
+        self.settings.local_api["enabled"] = True
+        self.local_api_last_error = ""
+        if not self._persist_settings(notify=False):
+            self._stop_local_api()
+            self.settings.local_api["enabled"] = False
+            return "API 已停止：无法保存启用设置。"
+        return self.local_api_status()
+
+    def set_local_api_port(self, port: int) -> str:
+        port = int(port)
+        if not 1 <= port <= 65535:
+            raise ValueError("端口必须在 1–65535 之间")
+        previous = int(self.settings.local_api.get("port", 17890))
+        if port == previous:
+            return self.local_api_status()
+        if self.exiting:
+            # SettingsPage.flush_state may commit the last edited field while
+            # the app is already closing.  Persist it, but never restart a
+            # listener that force_exit is about to stop.
+            self.settings.local_api["port"] = port
+            return self.local_api_status()
+        enabled = bool(self.settings.local_api.get("enabled", False))
+        was_running = bool(self.local_api_server and self.local_api_server.is_running)
+        if was_running:
+            self._stop_local_api()
+        self.settings.local_api["port"] = port
+        try:
+            if enabled and self.secret_store.exists():
+                self._start_local_api()
+        except (LocalAPIError, SecretStoreError):
+            self.local_api_last_error = f"端口 {port} 无法使用"
+            self.settings.local_api["port"] = previous
+            if was_running:
+                try:
+                    self._start_local_api()
+                except (LocalAPIError, SecretStoreError):
+                    self.settings.local_api["enabled"] = False
+            self._persist_settings(notify=False)
+            return f"端口 {port} 无法使用，已恢复为 {previous}。"
+        if not self._persist_settings(notify=False):
+            return "端口已在本次会话更改，但设置保存失败。"
+        return self.local_api_status()
+
+    def issue_local_api_token(self, action: str) -> str:
+        if action == "generate":
+            token = self.secret_store.generate()
+        elif action == "rotate":
+            token = self.secret_store.rotate()
+        else:
+            raise ValueError("令牌操作无效")
+        if bool(self.settings.local_api.get("enabled", False)):
+            try:
+                self._start_local_api()
+            except LocalAPIPortInUseError:
+                self.local_api_last_error = f"令牌已更新，但端口 {self.settings.local_api.get('port', 17890)} 被占用"
+            except (LocalAPIError, SecretStoreError):
+                self.local_api_last_error = "令牌已更新，但服务启动失败"
+        return token
+
+    def test_local_api_connection(self) -> str:
+        server = self.local_api_server
+        if server is None or not server.is_running:
+            return "连接测试失败：本机 API 当前未运行。"
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=2.0)
+        try:
+            connection.request("GET", "/health", headers={"Host": f"127.0.0.1:{server.port}"})
+            response = connection.getresponse()
+            body = response.read(16 * 1024 + 1)
+            if len(body) > 16 * 1024:
+                raise ValueError("health response too large")
+            payload = json.loads(body.decode("utf-8"))
+            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            if response.status == 200 and isinstance(data, dict) and data.get("service_status") == "running":
+                return f"连接成功：{server.base_url}/health（仅确认本机监听，不验证令牌）。"
+        except (OSError, ValueError, UnicodeError, http.client.HTTPException):
+            pass
+        finally:
+            connection.close()
+        return "连接测试失败：本机监听未返回有效健康状态。"
 
     def _queue_geometry_save(self, _event: tk.Event | None = None) -> None:
         if not self.settings.remember_window_geometry or self.history_open or self.root.state() != "normal":
@@ -3332,18 +4294,31 @@ class YaohengApp:
         if self.exiting:
             return
         self.exiting = True
+        for page_widget in self.pages.values():
+            if hasattr(page_widget, "flush_state"):
+                try:
+                    page_widget.flush_state()  # type: ignore[attr-defined]
+                except (RuntimeError, ValueError, tk.TclError):
+                    pass
         page = self.pages.get("calculator")
         if isinstance(page, CalculatorPage):
             self.settings.last_calculator_mode = "professional" if page.professional else "standard"
             self.settings.calculator_history = [list(item) for item in page.model.history[:self.settings.history_limit]] if self.settings.retain_history else []
         if self.settings.remember_window_geometry and not self.history_open and self.root.state() == "normal":
             self.settings.window_geometry = self.root.geometry()
+        cancel_pending = getattr(self.settings_store, "cancel_pending_save", None)
+        if callable(cancel_pending):
+            cancel_pending()
+        try:
+            self._stop_local_api()
+        except (LocalAPIError, OSError, RuntimeError):
+            pass
         self._persist_settings(notify=False)
         self.rate_results.close()
         self.loading_rates = False
         self.active_rate_section = None
         self.pending_rate_section = None
-        for attr in ("startup_job", "geometry_job"):
+        for attr in ("startup_job", "api_start_job", "geometry_job"):
             job = getattr(self, attr, None)
             if job:
                 try:
@@ -3363,6 +4338,7 @@ class YaohengApp:
         if not messagebox.askyesno("清理缓存", "确定清理汇率与行情缓存吗？\n应用设置、收藏和置顶不会被删除。"):
             return
         self.service.clear_cache()
+        self.c2c_service.clear_memory_cache()
         page = self.pages.get("settings")
         if isinstance(page, SettingsPage):
             page.refresh_cache_size()
@@ -3388,6 +4364,17 @@ class YaohengApp:
             imported = self.settings_store.from_file(Path(source))
             if not self.settings_store.save(imported):
                 raise OSError("应用设置文件不可写")
+            try:
+                self._stop_local_api()
+            except LocalAPIError:
+                pass
+            self.settings = imported
+            settings_page = self.pages.get("settings")
+            if isinstance(settings_page, SettingsPage):
+                settings_page.settings = self.settings
+                settings_page.api_enabled_var.set(bool(self.settings.local_api.get("enabled", False)))
+                settings_page.api_port_var.set(str(self.settings.local_api.get("port", 17890)))
+                settings_page.refresh_api_status()
             messagebox.showinfo("导入完成", "设置已导入，重新启动曜衡后全部生效。")
         except (OSError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
             messagebox.showerror("导入失败", f"该文件不是有效的曜衡设置：\n{exc}")
@@ -3395,7 +4382,19 @@ class YaohengApp:
     def reset_settings(self) -> None:
         if not messagebox.askyesno("恢复默认设置", "确定恢复所有默认设置吗？\n收藏、置顶和计算历史也会重置。"):
             return
-        if self.settings_store.save(AppSettings()):
+        defaults = AppSettings()
+        if self.settings_store.save(defaults):
+            try:
+                self._stop_local_api()
+            except LocalAPIError:
+                pass
+            self.settings = defaults
+            settings_page = self.pages.get("settings")
+            if isinstance(settings_page, SettingsPage):
+                settings_page.settings = self.settings
+                settings_page.api_enabled_var.set(False)
+                settings_page.api_port_var.set("17890")
+                settings_page.refresh_api_status()
             messagebox.showinfo("已恢复默认设置", "默认设置已写入，重新启动曜衡后全部生效。")
         else:
             messagebox.showerror("恢复失败", "应用设置文件不可写，请检查应用文件夹权限。")

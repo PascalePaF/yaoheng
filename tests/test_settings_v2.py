@@ -192,14 +192,14 @@ class SettingsPartitionAndPrivacyTests(unittest.TestCase):
         self.assertEqual(settings.pages["calculator"]["history_limit"], 44)
         self.assertEqual(settings.pages["fiat"]["favorites"], ["USD"])
 
-    def test_exchange_partition_does_not_become_a_317_navigation_target(self):
+    def test_exchange_partition_is_a_318_navigation_target(self):
         settings = SettingsStore.from_payload({
             "schema_version": 2,
             "startup_page": "exchange",
             "last_page": "exchange",
         })
-        self.assertEqual(settings.startup_page, "calculator")
-        self.assertEqual(settings.last_page, "calculator")
+        self.assertEqual(settings.startup_page, "exchange")
+        self.assertEqual(settings.last_page, "exchange")
         self.assertIn("exchange", settings.pages)
 
     def test_history_and_local_api_defaults_are_private_and_safe(self):
