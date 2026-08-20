@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $ProjectDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $AppName = -join @([char]26332, [char]34913)
-$AppVersion = "3.16"
+$AppVersion = "3.17"
 $ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion
 $GuideName = (-join @([char]20351, [char]29992, [char]35828, [char]26126)) + ".txt"
 $ThirdPartyNoticeName = "THIRD-PARTY-NOTICES.txt"

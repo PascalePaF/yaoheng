@@ -91,13 +91,13 @@ class ReleaseChecksTests(unittest.TestCase):
 
     def test_release_asset_names_are_stable_ascii(self):
         expected = [
-            "Yaoheng-3.16-Windows-x64-Setup.exe",
-            "Yaoheng-3.16-Windows-x64-Portable.zip",
+            "Yaoheng-3.17-Windows-x64-Setup.exe",
+            "Yaoheng-3.17-Windows-x64-Portable.zip",
         ]
         validate_release_asset_names(expected)
 
         for unsafe in (
-            "曜衡-3.16-Windows-x64-安装版.exe",
+            "曜衡-3.17-Windows-x64-安装版.exe",
             "nested/Yaoheng.zip",
             "Yaoheng Portable.zip",
         ):
