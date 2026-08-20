@@ -1,4 +1,5 @@
 {
+  "schema_version": 2,
   "theme": "dark",
   "timezone": "Asia/Tokyo",
   "data_dir": "",
@@ -25,5 +26,54 @@
   "favorite_fiats": [],
   "pinned_fiats": [],
   "favorite_cryptos": [],
-  "pinned_cryptos": []
+  "pinned_cryptos": [],
+  "pages": {
+    "exchange": {
+      "currencies": [
+        "CNY",
+        "USD",
+        "EUR",
+        "JPY",
+        "HKD",
+        "BTC",
+        "USDT"
+      ],
+      "primary_slot": 0,
+      "amount": "1",
+      "mode": "market",
+      "provider": "auto"
+    },
+    "calculator": {
+      "default_mode": "standard",
+      "remember_mode": true,
+      "last_mode": "standard",
+      "angle_mode": "DEG",
+      "history_limit": 30,
+      "retain_history": true,
+      "history": [],
+      "copy_result_format": "number"
+    },
+    "fiat": {
+      "favorites": [],
+      "pinned": []
+    },
+    "fiat_market": {},
+    "crypto": {
+      "favorites": [],
+      "pinned": []
+    },
+    "market": {},
+    "settings": {}
+  },
+  "conversion_history": {
+    "enabled": false,
+    "limit": 50,
+    "retention_days": 30,
+    "entries": []
+  },
+  "local_api": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 17890
+  }
 }

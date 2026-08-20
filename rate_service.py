@@ -7,15 +7,19 @@ import math
 import os
 import re
 import sys
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
-from decimal import Decimal, DecimalException, localcontext
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, RLock, get_ident
+from types import MappingProxyType
 from typing import Any
 
 import requests
+
+from app_version import APP_USER_AGENT, RATE_CACHE_SCHEMA_VERSION
+from conversion_core import DecimalConversionEngine, canonical_rate_string, parse_amount
 
 
 FIAT_API = "https://open.er-api.com/v6/latest/USD"
@@ -362,10 +366,43 @@ class RateSnapshot:
     fiat_updated_at: str = ""
     errors: list[str] | None = None
     coin_ids: dict[str, str] | None = None
+    rate_strings: dict[str, str] | None = None
 
     @classmethod
     def empty(cls) -> "RateSnapshot":
-        return cls({}, {}, {}, {}, "", "", [], {})
+        return cls({}, {}, {}, {}, "", "", [], {}, {})
+
+
+@dataclass(frozen=True)
+class DecimalRateSnapshot:
+    """Immutable, JSON-safe view used by all new conversion consumers."""
+
+    rates: Mapping[str, str]
+    names: Mapping[str, str]
+    kinds: Mapping[str, str]
+    fetched_at: str
+    fiat_updated_at: str = ""
+    errors: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rates", MappingProxyType(dict(self.rates)))
+        object.__setattr__(self, "names", MappingProxyType(dict(self.names)))
+        object.__setattr__(self, "kinds", MappingProxyType(dict(self.kinds)))
+        object.__setattr__(self, "errors", tuple(self.errors))
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return {
+            "cache_schema_version": RATE_CACHE_SCHEMA_VERSION,
+            "rates": dict(self.rates),
+            "names": dict(self.names),
+            "kinds": dict(self.kinds),
+            "fetched_at": self.fetched_at,
+            "fiat_updated_at": self.fiat_updated_at,
+            "errors": list(self.errors),
+        }
+
+
+ExactRateSnapshot = DecimalRateSnapshot
 
 
 @dataclass
@@ -386,7 +423,7 @@ class RateService:
         self.data_dir = Path(data_dir) if data_dir is not None else portable_dir() / "data"
         self.cache_path = self.data_dir / "rates_cache.json"
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Yaoheng/3.17 (Windows)"})
+        self.session.headers.update({"User-Agent": APP_USER_AGENT})
         self.cache_limit_mb = 0
         self.snapshot = self.load_cache()
 
@@ -409,22 +446,42 @@ class RateService:
                 data = json.loads(self.cache_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or not isinstance(data.get("rates"), dict):
                 raise ValueError("缓存格式无效")
+            raw_cache_version = data.get("cache_schema_version", 1)
+            if (
+                isinstance(raw_cache_version, bool)
+                or not isinstance(raw_cache_version, int)
+                or not 1 <= raw_cache_version <= RATE_CACHE_SCHEMA_VERSION
+            ):
+                raise ValueError("缓存 schema 版本无效")
             if len(data["rates"]) > MAX_CACHE_RATE_ENTRIES:
                 raise ValueError("缓存中的汇率条目过多")
             rates: dict[str, float] = {}
+            rate_strings: dict[str, str] = {}
             for raw_code, raw_value in data["rates"].items():
-                code = str(raw_code).upper()
+                code = str(raw_code).strip().upper()
                 try:
-                    value = _finite_float(raw_value)
+                    rate_text = canonical_rate_string(raw_value)
                 except (TypeError, ValueError, OverflowError):
                     continue
-                if re.fullmatch(r"[A-Z0-9_]{1,24}", code) and value > 0:
-                    rates[code] = value
-            if not rates:
+                if re.fullmatch(r"[A-Z0-9_]{1,24}", code):
+                    rate_strings[code] = rate_text
+                    try:
+                        value = float(rate_text)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    if math.isfinite(value) and value > 0:
+                        rates[code] = value
+            if not rate_strings:
                 raise ValueError("缓存中没有有效汇率")
-            if "USD" not in rates or not math.isclose(
-                rates["USD"], 1.0, rel_tol=0.0, abs_tol=1e-12
-            ):
+            if raw_cache_version == 1:
+                if "USD" not in rates or not math.isclose(
+                    rates["USD"], 1.0, rel_tol=0.0, abs_tol=1e-12
+                ):
+                    raise ValueError("缓存的美元基准汇率无效")
+                # Normalize a tolerated legacy float anchor at the migration boundary.
+                rates["USD"] = 1.0
+                rate_strings["USD"] = "1"
+            elif rate_strings.get("USD") != "1" or rates.get("USD") != 1.0:
                 raise ValueError("缓存的美元基准汇率无效")
             raw_names_source = data.get("names") if isinstance(data.get("names"), dict) else {}
             raw_kinds_source = data.get("kinds") if isinstance(data.get("kinds"), dict) else {}
@@ -433,10 +490,10 @@ class RateService:
             raw_kinds = {str(code).upper(): value for code, value in raw_kinds_source.items()}
             raw_changes = {str(code).upper(): value for code, value in raw_changes_source.items()}
             names = {
-                code: _clean_display_name(raw_names.get(code), code) for code in rates
+                code: _clean_display_name(raw_names.get(code), code) for code in rate_strings
             }
             kinds: dict[str, str] = {}
-            for code in rates:
+            for code in rate_strings:
                 if code in FIAT_NAMES:
                     kinds[code] = "fiat"
                 elif code in BINANCE_COIN_IDS:
@@ -446,7 +503,7 @@ class RateService:
                     if isinstance(raw_kind, str) and raw_kind in {"fiat", "crypto"}:
                         kinds[code] = raw_kind
             changes: dict[str, float | None] = {}
-            for code in rates:
+            for code in rate_strings:
                 raw_change = raw_changes.get(code)
                 if raw_change is None:
                     changes[code] = None
@@ -460,7 +517,7 @@ class RateService:
             raw_coin_ids_source = data.get("coin_ids") if isinstance(data.get("coin_ids"), dict) else {}
             raw_coin_ids = {str(code).upper(): value for code, value in raw_coin_ids_source.items()}
             coin_ids: dict[str, str] = {}
-            for code in rates:
+            for code in rate_strings:
                 coin_id = BINANCE_COIN_IDS.get(code) or _normalize_coin_id(raw_coin_ids.get(code))
                 if coin_id:
                     coin_ids[code] = coin_id
@@ -474,17 +531,79 @@ class RateService:
                 fiat_updated_at=_normalize_iso_timestamp(data.get("fiat_updated_at")),
                 errors=[str(item)[:240] for item in raw_errors[:20]],
                 coin_ids=coin_ids,
+                rate_strings=rate_strings,
             )
         except (OSError, OverflowError, RecursionError, ValueError, TypeError):
             return RateSnapshot.empty()
 
     def save_cache(self, snapshot: RateSnapshot) -> bool:
         try:
-            self._atomic_write_json(self.cache_path, asdict(snapshot))
+            payload = {
+                "cache_schema_version": RATE_CACHE_SCHEMA_VERSION,
+                "rates": self._rate_strings_from_snapshot(snapshot),
+                "names": dict(snapshot.names),
+                "kinds": dict(snapshot.kinds),
+                "changes": dict(snapshot.changes),
+                "fetched_at": snapshot.fetched_at,
+                "fiat_updated_at": snapshot.fiat_updated_at,
+                "errors": list(snapshot.errors or ()),
+                "coin_ids": dict(snapshot.coin_ids or {}),
+            }
+            self._atomic_write_json(self.cache_path, payload)
         except (OSError, RecursionError, TypeError, ValueError):
             # A read-only USB drive should not stop online conversion from working.
             return False
         return True
+
+    @staticmethod
+    def _rate_strings_from_snapshot(
+        snapshot: RateSnapshot, *, require_anchor: bool = True
+    ) -> dict[str, str]:
+        """Validate and copy exact strings, filling legacy float-only entries."""
+
+        result: dict[str, str] = {}
+        exact_source = snapshot.rate_strings if isinstance(snapshot.rate_strings, Mapping) else {}
+        for raw_code, raw_rate in exact_source.items():
+            code = str(raw_code).strip().upper()
+            if re.fullmatch(r"[A-Z0-9_]{1,24}", code) is None:
+                raise ValueError("汇率快照含无效币种代码")
+            result[code] = canonical_rate_string(raw_rate)
+        if not isinstance(snapshot.rates, Mapping):
+            raise ValueError("汇率快照格式无效")
+        for raw_code, raw_rate in snapshot.rates.items():
+            code = str(raw_code).strip().upper()
+            if re.fullmatch(r"[A-Z0-9_]{1,24}", code) is None:
+                raise ValueError("汇率快照含无效币种代码")
+            result.setdefault(code, canonical_rate_string(raw_rate))
+        if (result or require_anchor) and result.get("USD") != "1":
+            raise ValueError("汇率快照缺少有效美元基准")
+        return result
+
+    def get_decimal_snapshot(self) -> DecimalRateSnapshot:
+        """Return an immutable string-rate snapshot without exposing floats."""
+
+        with self._state_lock:
+            snapshot = self.snapshot
+            rates = self._rate_strings_from_snapshot(snapshot, require_anchor=False)
+            names = {code: snapshot.names.get(code, code) for code in rates}
+            kinds = {code: snapshot.kinds[code] for code in rates if code in snapshot.kinds}
+            return DecimalRateSnapshot(
+                rates=rates,
+                names=names,
+                kinds=kinds,
+                fetched_at=snapshot.fetched_at,
+                fiat_updated_at=snapshot.fiat_updated_at,
+                errors=tuple(snapshot.errors or ()),
+            )
+
+    get_exact_snapshot = get_decimal_snapshot
+
+    @property
+    def decimal_snapshot(self) -> DecimalRateSnapshot:
+        return self.get_decimal_snapshot()
+
+    def get_rate_strings(self) -> dict[str, str]:
+        return dict(self.get_decimal_snapshot().rates)
 
     def _atomic_write_json(self, path: Path, payload: Any) -> None:
         encoded = json.dumps(
@@ -1073,35 +1192,27 @@ class RateService:
             raise ValueError("备用行情数据无效")
         self._apply_binance_rows(rows, rates, names, kinds, changes, coin_ids)
 
+    def convert_exact(self, amount: object, source: str, target: str) -> str:
+        """Convert with canonical strings and no float result boundary."""
+
+        snapshot = self.get_decimal_snapshot()
+        engine = DecimalConversionEngine(snapshot.rates, snapshot.kinds)
+        return engine.convert_exact(amount, source, target)
+
+    convert_decimal = convert_exact
+
     def convert(self, amount: float, source: str, target: str) -> float:
-        source_code = str(source).strip().upper()
-        target_code = str(target).strip().upper()
-        with self._state_lock:
-            snapshot = self.snapshot
-        if source_code not in snapshot.rates or target_code not in snapshot.rates:
-            raise ValueError("尚无所选币种的汇率")
+        """3.17 compatibility wrapper; new callers should use convert_exact."""
+
+        amount_value = parse_amount(amount)
+        decimal_result = self.convert_exact(amount, source, target)
         try:
-            amount_value = Decimal(str(amount))
-            source_rate = Decimal(str(snapshot.rates[source_code]))
-            target_rate = Decimal(str(snapshot.rates[target_code]))
-        except (DecimalException, TypeError, ValueError) as exc:
-            raise ValueError("金额或汇率无效") from exc
-        if not all(value.is_finite() for value in (amount_value, source_rate, target_rate)):
-            raise ValueError("金额或汇率无效")
-        if source_rate <= 0 or target_rate <= 0:
-            raise ValueError("汇率必须大于零")
-        try:
-            with localcontext() as context:
-                context.prec = 50
-                decimal_result = amount_value / source_rate * target_rate
             result = float(decimal_result)
-        except (DecimalException, OverflowError, ValueError) as exc:
+        except (OverflowError, ValueError) as exc:
             raise ValueError("换算结果超出范围") from exc
-        if amount_value != 0 and decimal_result == 0:
-            raise ValueError("换算结果超出范围")
         if not math.isfinite(result):
             raise ValueError("换算结果超出范围")
-        if decimal_result != 0 and result == 0:
+        if amount_value != 0 and result == 0.0:
             raise ValueError("换算结果超出范围")
         return result
 
