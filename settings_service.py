@@ -48,7 +48,7 @@ CURRENT_PAGE_NAMES = (
     "exchange", "calculator", "fiat", "fiat_market", "crypto", "market", "settings",
 )
 LEGACY_NAVIGATION_PAGES = frozenset(
-    {"calculator", "fiat", "fiat_market", "crypto", "market", "settings"}
+    {"calculator", "exchange", "fiat", "fiat_market", "crypto", "market", "settings"}
 )
 
 _SETTINGS_LOCKS_GUARD = threading.Lock()
@@ -94,6 +94,7 @@ def _default_exchange_page() -> dict[str, Any]:
         "amount": "1",
         "mode": "market",
         "provider": "auto",
+        "payment_method": "",
     }
 
 
@@ -294,33 +295,43 @@ def _validate_exchange_page(value: object) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return defaults
     currencies = value.get("currencies", defaults["currencies"])
-    if not isinstance(currencies, list) or len(currencies) != len(DEFAULT_EXCHANGE_CURRENCIES):
-        return defaults
-    try:
-        normalized = [normalize_currency_code(code) for code in currencies]
-    except (TypeError, ValueError):
-        return defaults
-    if len(set(normalized)) != len(DEFAULT_EXCHANGE_CURRENCIES):
-        return defaults
+    normalized = list(defaults["currencies"])
+    if isinstance(currencies, list) and len(currencies) == len(DEFAULT_EXCHANGE_CURRENCIES):
+        try:
+            candidate = [normalize_currency_code(code) for code in currencies]
+            if len(set(candidate)) == len(DEFAULT_EXCHANGE_CURRENCIES):
+                normalized = candidate
+        except (TypeError, ValueError):
+            pass
     primary_slot = value.get("primary_slot", defaults["primary_slot"])
     if isinstance(primary_slot, bool) or not isinstance(primary_slot, int) or not 0 <= primary_slot < len(normalized):
-        return defaults
-    try:
-        amount = canonical_amount_string(value.get("amount", defaults["amount"]))
-    except AmountInputError:
-        return defaults
+        primary_slot = defaults["primary_slot"]
+    raw_amount = str(value.get("amount", defaults["amount"]) or "").strip()
+    if raw_amount:
+        try:
+            amount = canonical_amount_string(raw_amount)
+        except AmountInputError:
+            amount = defaults["amount"]
+    else:
+        amount = ""
     mode = value.get("mode", defaults["mode"])
     if mode not in {"market", "c2c"}:
-        return defaults
-    provider = value.get("provider", defaults["provider"])
-    if not isinstance(provider, str) or re.fullmatch(r"[a-z0-9_-]{1,32}", provider) is None:
-        return defaults
+        mode = defaults["mode"]
+    provider = str(value.get("provider", defaults["provider"])).strip().lower()
+    if provider not in {"auto", "binance", "okx"}:
+        provider = defaults["provider"]
+    payment_method = value.get("payment_method", defaults["payment_method"])
+    if not isinstance(payment_method, str) or (
+        payment_method and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", payment_method) is None
+    ):
+        payment_method = ""
     return {
         "currencies": normalized,
         "primary_slot": primary_slot,
         "amount": amount,
         "mode": mode,
         "provider": provider,
+        "payment_method": payment_method,
     }
 
 
