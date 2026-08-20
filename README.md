@@ -5,7 +5,7 @@
 <h1 align="center">曜衡</h1>
 
 <p align="center">
-  一款面向 Windows 的桌面计算器、全球货币换算与虚拟币行情工具。
+  Windows 桌面计算器、七币种兑换、法币/虚拟币换算、C2C 按金额报价与行情趋势工具。
 </p>
 
 <p align="center">
@@ -17,58 +17,99 @@
 
 ## 简介
 
-曜衡把日常计算、三端货币换算、虚拟币换算和趋势行情整合在一个高对比度桌面界面中。它支持键盘公式输入、专业函数、计算历史、法币与虚拟币实时搜索、收藏置顶、多计价币种以及 1 / 7 / 30 / 90 日趋势查看。
+曜衡 3.18 把日常/专业计算、七个法币或虚拟币同步兑换、三端换算、按输入金额查询的 C2C 参考报价以及法币和虚拟币趋势整合在一个桌面应用中。
 
-程序无需登录，不包含广告或遥测。设置、历史记录和行情缓存保存在本机。
+应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
 ## 下载
 
-请前往 [最新 Release](https://github.com/alokxfox/yaoheng/releases/latest) 下载：
+前往 [最新 Release](https://github.com/alokxfox/yaoheng/releases/latest) 下载：
 
-| 版本 | 文件 | 适合场景 |
+| 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-<版本>-Windows-x64-Setup.exe` | 自动创建开始菜单入口，支持可选桌面快捷方式和标准卸载 |
-| 绿色免安装版 | `Yaoheng-<版本>-Windows-x64-Portable.zip` | 解压即用，适合移动硬盘、U 盘或自定义目录 |
+| Windows 安装版（推荐） | `Yaoheng-3.18-Windows-x64-Setup.exe` | 当前用户安装、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-3.18-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
-系统要求：Windows 10 或 Windows 11，64 位。实时汇率和行情需要网络连接；短时断网时会尝试使用最近一次可信缓存。
+系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
 
-> 当前安装包未使用商业代码签名证书。Windows SmartScreen 可能在首次运行时显示未知发布者提示，请只从本仓库 Release 页面下载，并核对 Release 中公布的 SHA-256。
-
-每次正式构建会生成 `SHA256SUMS.txt`。下载后可用 PowerShell 计算文件摘要，并与清单中的同名文件核对：
+> 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-<版本>-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-<版本>-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.18-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.18-Windows-x64-Portable.zip"
 ```
 
-## 功能亮点
+## 功能
 
-| 模块 | 能力 |
+| 模块 | 主要能力 |
 | --- | --- |
-| 计算器 | 标准与专业模式、键盘公式、隐式乘法、科学计数法、角度制、历史记录和多种复制格式 |
-| 货币换算 | 全球法币 A / B / C 三端联动、任意端输入、快速交换、搜索、收藏、置顶和排序 |
-| 虚拟币换算 | 法币与主流虚拟币自由组合，小额价格保留有效数字，24 小时涨跌即时着色 |
-| 行情趋势 | 法币与虚拟币列表、可切换计价货币、参考数额、24 小时变化及 1 / 7 / 30 / 90 日走势图 |
-| 个性化 | 黑夜 / 白天主题、IANA 时区、启动页、窗口行为、自动刷新和缓存上限 |
-| 可靠性 | 多数据源校验与回退、并发安全缓存、原子保存、损坏恢复和后台请求竞态保护 |
+| 计算器 | 标准/专业模式、键盘公式、隐式乘法、科学计数法、DEG/RAD、历史与多种复制格式 |
+| 七币种兑换 | 一个主币居中、六个目标币按三列两行排列；同步换算、设为主币、按精确结果互换 |
+| 货币换算 | 全球法币 A/B/C 三端联动、任意端输入、搜索、收藏、置顶、地区与 24h 涨跌 |
+| 虚拟币换算 | 法币与虚拟币三端自由组合，可切换普通汇率或 C2C 按金额 |
+| 行情趋势 | 法币/虚拟币整表、计价币、参考数额、搜索排序及 1/7/30/90 日趋势 |
+| 本机 API | 默认关闭，仅 `127.0.0.1`；计算、换算、命令和能力查询，为未来机器人接入预留 |
+| 可靠性 | 十进制精确换算、响应校验、并发合并、原子缓存/设置、备份恢复和旧结果隔离 |
 
-## 快速使用
+## 七币种兑换
 
-1. 安装版直接运行安装程序；绿色版解压后双击 `曜衡.exe`。
-2. 在计算器公式框中输入算式，按 `Enter` 或 `=` 计算。
-3. 在货币或虚拟币页面的任意金额框中输入数值或四则算式，另外两端会同步换算。
-4. 在行情页双击币种查看趋势；切换计价货币后，整表价格、涨跌方向和颜色会同步重算。
-5. 在设置页调整自动刷新、主题、时区、历史记录和数据目录。
+“兑换”页位于计算器和货币页之间：
 
-更完整的操作说明随安装包和绿色版一同提供，文件名为 `使用说明.txt`。
+- 第一行中间为主币，其余六币种按三列两行排列；七个槽位保持唯一。
+- 输入主币金额后六个结果同步更新；目标卡可设为主币。
+- “与主币互换”使用内部未舍入的精确结果作为新输入，不拿显示层的短小数反算。
+- 币种、主币、金额、模式、平台和支付方式会保存，下次打开恢复上次设置。
 
-## 数据、隐私与风险提示
+普通汇率模式使用精确十进制行情。C2C 模式只把“法币 ↔ 虚拟币”边交给 C2C 服务；法币↔法币、虚拟币↔虚拟币仍使用普通汇率，并分别标明实时、缓存或降级状态。
 
-- 默认设置与缓存位于应用目录；也可在设置页迁移数据目录、导入或导出设置。卸载器只会按用户确认删除应用目录内的数据，不会删除自定义数据目录。
-- 发布包不会包含开发电脑上的设置、历史记录、收藏、缓存或自定义路径。
-- 法币汇率来自 ExchangeRate-API，法币历史趋势来自 Frankfurter；虚拟币行情主要来自 Binance，并使用 CoinGecko 作为补充或备用。
-- 外部数据源可能延迟、中断或调整接口。曜衡会校验响应并尽量回退到最后可信数据，但不保证行情的实时性、完整性或结算准确性。
-- 所有价格、汇率和趋势仅供参考，不构成交易、投资或结算建议。
+## C2C 能力与边界
+
+曜衡查询的是参考报价，不执行交易：
+
+- Binance：只使用官方 P2P Skill 的公共只读报价、广告列表和支付方式接口；不含账户、下单、订单或商家管理能力。
+- OKX：仅提供官方白名单/商家 P2P 的可配置只读框架。默认未配置、不会进入自动报价；需要集成方取得官方授权、字段契约和瞬时凭据。
+- 支付方式来自平台返回的官方 identifier，不硬编码网页内部标识。
+- “最低展示价”和“当前金额可匹配价”分开显示；普通行情回退会明确标为非 C2C 可成交价。
+- KYC、地区、账户年龄、付款资格、广告方条件和实际库存仍由平台决定，曜衡不保证成交。
+
+应用不使用网页内部或逆向接口，也没有任何 C2C 写入/交易接口。
+
+## 页面状态与本机数据
+
+兑换、货币、虚拟币和两个行情页会保存各自的币种、主输入、金额、计价币、参考数额、周期和筛选。设置采用 schema v2、原子替换与备份恢复；从旧版本升级时会保留迁移前备份，未来版本设置不会被旧程序覆盖。
+
+默认数据位于应用目录，也可以在设置页迁移到自定义目录。卸载器只在用户确认后删除应用目录内的设置、历史、缓存和本机 API 令牌；自定义数据目录不会被卸载器删除。
+
+## 本机 API 与机器人接入
+
+设置页的“API 接入”默认关闭。启用前需生成令牌：明文只在生成或轮换成功时显示一次，请立即保存到可信密码管理器；磁盘仅保存带盐的 scrypt 校验材料，令牌不会进入设置导出、日志或 Release 包。
+
+安全边界：
+
+- 只允许固定地址 `127.0.0.1`，不监听局域网或公网；生产模式拒绝随机端口。
+- 除 `GET /health` 外均要求 `Authorization: Bearer <token>`。
+- 校验 Host、浏览器 Origin、JSON 大小/重复键/NaN，并提供请求限流与 C2C 并发上限。
+- 连接测试只确认本机监听，不会把未认证的健康检查描述成令牌认证成功。
+
+接口包括：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/health` | 无认证健康检查，仅确认本机监听 |
+| GET | `/v1/capabilities` | 当前计算、换算与 C2C 平台能力 |
+| POST | `/v1/calculate` | 安全计算器 |
+| POST | `/v1/convert` | 普通或 C2C 换算 |
+| POST | `/v1/command` | 机器人友好的命令入口 |
+
+命令层支持 `/calc (12.5+7)*3`、`/fx 100 CNY USD`、`/c2c 1000 CNY USDT --provider binance`，以及 `兑换 10 CNY USD` 等中文形式。微信、QQ、Telegram 等机器人应作为独立适配层调用本机 API；仓库不捆绑第三方机器人 SDK 或平台凭据。
+
+## 数据源与风险提示
+
+- 法币现价来自 ExchangeRate-API，法币历史来自 Frankfurter。
+- 虚拟币行情主要来自 Binance，并以 CoinGecko 作为补充或备用。
+- C2C 来源与能力边界见上节；外部服务可能限流、中断、改变字段或受地区限制。
+- 所有价格、汇率、趋势和 C2C 结果仅供参考，不构成交易、投资、付款或结算建议。
 
 ## 从源码运行
 
@@ -85,53 +126,52 @@ python main.py
 
 ## 测试与构建
 
-运行自动化测试：
-
 ```powershell
 python -B -m unittest discover -s tests -v
 ```
 
-构建完整 Windows 发行包需要 Python 3.13.15+ 与 Inno Setup 6。构建脚本还会检查 Python 捆绑的 OpenSSL 是否达到当前安全修复基线，避免把过期原生运行时带入安装包：
+完整 Windows 发布构建要求 Python 3.13.15+、达到脚本安全基线的 OpenSSL，以及 Inno Setup 6：
 
 ```powershell
-winget install --id Python.Python.3.13 -e
 winget install --id JRSoftware.InnoSetup -e
+$env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 .\build.ps1
 ```
 
-如需使用未加入 `PATH` 的隔离 Python，可将其绝对路径放入 `$env:YAO_HENG_PYTHON` 后再运行构建脚本。
+构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
-构建脚本会在隔离环境中安装完整锁定的依赖、拒绝隐式依赖和源码包、检查语法、运行全部测试，并对暂存目录和压缩包执行内容一致性与隐私扫描，然后生成：
-
-- `release\曜衡\曜衡.exe`：本机可直接运行的文件夹版；
-- `release\Yaoheng-<版本>-Windows-x64-Portable.zip`：不含本机隐私数据的绿色版；
-- `release\Yaoheng-<版本>-Windows-x64-Setup.exe`：当前用户安装包。
-- `release\SHA256SUMS.txt`：上述可发布 ZIP 与安装器的 SHA-256 清单。
-
-安装器使用 Inno Setup 的稳定版工具链构建。简体中文安装界面采用项目内固定版本的第三方翻译，来源与许可证见 `installer/THIRD-PARTY-NOTICES.txt`；成品中的 `licenses/` 目录包含实际捆绑的 Python、OpenSSL、Tcl/Tk 与 Python 依赖许可证文本。
+- `release\曜衡\曜衡.exe`
+- `release\Yaoheng-3.18-Windows-x64-Portable.zip`
+- `release\Yaoheng-3.18-Windows-x64-Setup.exe`
+- `release\SHA256SUMS.txt`
 
 ## 项目结构
 
 ```text
 main.py                  程序入口
-app_ui.py                界面与交互逻辑
+app_ui.py                主窗口、页面与交互
 calculator_core.py       计算核心
-rate_service.py          汇率、行情、趋势与缓存服务
-settings_service.py      设置与数据目录管理
-tests/                   自动化回归测试
-installer/               Windows 安装器配置与语言资源
-build.ps1                测试并构建完整发行包
-CHANGELOG.md             版本更新记录
+conversion_core.py       十进制精确换算
+exchange_page.py         七币种状态与路由
+rate_service.py          汇率、趋势与缓存
+c2c/                     Binance/OKX 只读 C2C 层
+command_service.py       机器人命令解析与执行
+local_api.py             仅本机 HTTP API
+secret_store.py          一次性令牌校验材料
+settings_service.py      设置、迁移与数据目录
+tests/                   离线自动化回归测试
+installer/               Windows 安装器配置
+build.ps1                完整发布构建
 ```
 
-`app_settings.json`、`data/`、`build/`、`dist/` 和 `release/` 均为本机运行或构建生成内容，不纳入源码版本控制。
+`app_settings.json`、`private/`、`data/`、`build/`、`dist/` 与 `release/` 都是本机运行或构建内容，不纳入源码版本控制。
 
 ## 参与改进
 
-欢迎通过 [Issues](https://github.com/alokxfox/yaoheng/issues) 报告可复现的问题或提出建议。提交问题时请附上 Windows 版本、曜衡版本、复现步骤、预期结果和实际结果；请勿上传包含个人设置或缓存的文件。
+欢迎通过 [Issues](https://github.com/alokxfox/yaoheng/issues) 提交可复现问题。请附 Windows/曜衡版本、复现步骤、预期和实际结果；不要上传个人设置、缓存或令牌文件。
 
-版本变化请查看 [CHANGELOG.md](CHANGELOG.md)。
+版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可
 
-当前仓库未附加开源许可证。除非作者另行明确授权，仓库公开可见不代表授予复制、修改、再分发或商业使用权。
+当前仓库未附加开源许可证。仓库公开可见不代表授予复制、修改、再分发或商业使用权，除非作者另行明确授权。

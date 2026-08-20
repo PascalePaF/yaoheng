@@ -41,7 +41,8 @@
       "primary_slot": 0,
       "amount": "1",
       "mode": "market",
-      "provider": "auto"
+      "provider": "auto",
+      "payment_method": ""
     },
     "calculator": {
       "default_mode": "standard",
@@ -54,15 +55,43 @@
       "copy_result_format": "number"
     },
     "fiat": {
+      "currencies": ["CNY", "USD", "EUR"],
+      "amounts": ["1000", "", ""],
+      "active_side": "a",
+      "table_base": "CNY",
+      "reference_amount": "1",
+      "mode": "market",
+      "provider": "auto",
+      "payment_method": "",
       "favorites": [],
       "pinned": []
     },
-    "fiat_market": {},
+    "fiat_market": {
+      "selected_code": "USD",
+      "days": 7,
+      "quote": "CNY",
+      "reference_amount": "1",
+      "search": ""
+    },
     "crypto": {
+      "currencies": ["CNY", "BTC", "USDT"],
+      "amounts": ["10000", "", ""],
+      "active_side": "a",
+      "table_base": "CNY",
+      "reference_amount": "1",
+      "mode": "market",
+      "provider": "auto",
+      "payment_method": "",
       "favorites": [],
       "pinned": []
     },
-    "market": {},
+    "market": {
+      "selected_code": "BTC",
+      "days": 7,
+      "quote": "CNY",
+      "reference_amount": "1",
+      "search": ""
+    },
     "settings": {}
   },
   "conversion_history": {
