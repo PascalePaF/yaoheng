@@ -160,6 +160,11 @@ class ReleaseChecksTests(unittest.TestCase):
         )
         self.assertIn(f'$AppVersion = "{APP_VERSION}"', build_script)
         self.assertIn(f'#define AppVersion "{APP_VERSION}"', installer_script)
+        # PowerShell's comma operator binds before + here; the parentheses are
+        # required or all generated item names collapse into one string and an
+        # old _internal directory survives the copy.
+        self.assertIn('($AppName + ".exe"), "_internal"', build_script)
+        self.assertNotIn('$AppName + ".exe", "_internal"', build_script)
         for source in (
             "app_version.py",
             "conversion_core.py",

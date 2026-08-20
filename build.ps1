@@ -299,7 +299,7 @@ try {
     # unrelated files in the portable directory remain untouched. Replacing the
     # entire _internal tree prevents stale bundled libraries from surviving.
     $GeneratedItems = @(
-        $AppName + ".exe", "_internal", $GuideName, "app.ico", "app.png",
+        ($AppName + ".exe"), "_internal", $GuideName, "app.ico", "app.png",
         $ThirdPartyNoticeName, "licenses"
     )
     foreach ($GeneratedItem in $GeneratedItems) {
