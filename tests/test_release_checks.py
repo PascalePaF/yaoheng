@@ -172,11 +172,26 @@ class ReleaseChecksTests(unittest.TestCase):
             "command_service.py",
             "local_api.py",
             "secret_store.py",
+            "update_service.py",
             "c2c",
         ):
             with self.subTest(source=source):
                 self.assertIn(f'"{source}"', build_script)
         self.assertIn("DelTree(ExpandConstant('{app}\\private')", installer_script)
+        self.assertIn("AppId={{49A035BF-7BEC-4FE1-84C4-EEBFD503A917}", installer_script)
+        self.assertIn("#ifdef UpgradeSmokeTest", installer_script)
+        self.assertIn("AppId={{20F8D67B-55F8-48D7-91E1-04986C8CF8A3}", installer_script)
+        self.assertIn("UsePreviousAppDir=yes", installer_script)
+        self.assertIn("UsePreviousGroup=yes", installer_script)
+        self.assertIn("UsePreviousTasks=yes", installer_script)
+        self.assertIn("CloseApplications=yes", installer_script)
+        self.assertIn("RestartApplications=yes", installer_script)
+        install_delete = installer_script.split("[InstallDelete]", 1)[1].split("[Icons]", 1)[0]
+        self.assertIn('Name: "{app}\\_internal"', install_delete)
+        self.assertIn('Name: "{app}\\{#AppExeName}"', install_delete)
+        self.assertNotIn('Name: "{app}\\private"', install_delete)
+        self.assertNotIn('Name: "{app}\\data"', install_delete)
+        self.assertNotIn('Name: "{app}\\app_settings', install_delete)
 
     def test_release_runtime_parses_openssl_patch_field_correctly(self):
         validate_release_runtime(

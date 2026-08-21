@@ -1,4 +1,4 @@
-"""Public API for the version 3.18 C2C quote subsystem."""
+"""Public API for the current C2C quote subsystem."""
 
 from .base import (
     BaseP2PAdapter,

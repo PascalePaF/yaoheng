@@ -37,6 +37,7 @@ from local_api import LocalAPIError, LocalAPIPortInUseError, LocalAPIServer
 from rate_service import RateService, RateSnapshot, crypto_display_name, fiat_display_name, fiat_region, portable_dir, relative_rate_change
 from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
+from update_service import DownloadedUpdate, GitHubUpdateService, UpdateError, UpdateInfo
 
 
 THEMES = {
@@ -148,6 +149,20 @@ def enable_dpi_awareness() -> None:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+
+
+def register_windows_restart() -> bool:
+    """Let Windows Restart Manager reopen a packaged app after an upgrade."""
+
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+    try:
+        function = ctypes.windll.kernel32.RegisterApplicationRestart
+        function.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        function.restype = ctypes.c_long
+        return int(function(None, 0)) >= 0
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
 
 
 def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
@@ -3064,6 +3079,9 @@ class SettingsPage(tk.Frame):
         api_port_callback: Callable[[int], str],
         api_token_callback: Callable[[str], str],
         api_test_callback: Callable[[], str],
+        update_check_callback: Callable[[], UpdateInfo],
+        update_download_callback: Callable[[UpdateInfo], DownloadedUpdate],
+        update_install_callback: Callable[[DownloadedUpdate], None],
         exit_callback: Callable[[], None],
     ) -> None:
         super().__init__(master, bg=COLORS["bg"])
@@ -3086,6 +3104,9 @@ class SettingsPage(tk.Frame):
         self.api_port_callback = api_port_callback
         self.api_token_callback = api_token_callback
         self.api_test_callback = api_test_callback
+        self.update_check_callback = update_check_callback
+        self.update_download_callback = update_download_callback
+        self.update_install_callback = update_install_callback
         self.exit_callback = exit_callback
         self.theme_var = tk.StringVar(value=settings.theme)
         self.timezone_var = tk.StringVar()
@@ -3115,6 +3136,10 @@ class SettingsPage(tk.Frame):
         self.api_token_once_var = tk.StringVar(value="")
         self.api_results = TkResultBridge(self, self._finish_api_action)
         self.api_action_busy = False
+        self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION} · 尚未检查更新")
+        self.update_results = TkResultBridge(self, self._finish_update_action)
+        self.update_action_busy = False
+        self.available_update: UpdateInfo | None = None
         self.zones = timezone_names()
         self.zone_infos = {zone: ZoneInfo(zone) for zone in self.zones}
         self.zone_display_to_name: dict[str, str] = {}
@@ -3249,7 +3274,44 @@ class SettingsPage(tk.Frame):
             bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8), wraplength=960, justify="left",
         ).pack(anchor="w", padx=20, pady=(0, 16))
 
-        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 5, 0, columnspan=2)
+        update_card = self._card(
+            body,
+            "软件更新",
+            "从曜衡官方 GitHub Release 检查更新；安装包下载后必须通过 SHA-256 校验",
+            5,
+            0,
+            columnspan=2,
+        )
+        update_row = tk.Frame(update_card, bg=COLORS["card"])
+        update_row.pack(fill="x", padx=20, pady=(10, 6))
+        tk.Label(
+            update_row,
+            textvariable=self.update_status_var,
+            bg=COLORS["accent_dark"],
+            fg=COLORS["accent"],
+            font=(FONT, 9, "bold"),
+            anchor="w",
+            justify="left",
+            padx=12,
+            pady=8,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 10))
+        self.update_check_button = AppButton(
+            update_row, "检查更新", self._check_for_update, "outline", 9,
+        )
+        self.update_check_button.pack(side="left", padx=4, ipady=5)
+        self.update_install_button = AppButton(
+            update_row, "下载并升级", self._download_and_install_update, "accent", 9,
+        )
+        self.update_install_button.pack(side="left", padx=(4, 0), ipady=5)
+        self.update_install_button.configure(state="disabled", cursor="arrow")
+        tk.Label(
+            update_card,
+            text="升级时会打开覆盖安装程序并安全退出曜衡；原设置、收藏、历史和缓存默认保留。",
+            bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8),
+            wraplength=960, justify="left",
+        ).pack(anchor="w", padx=20, pady=(0, 16))
+
+        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 6, 0, columnspan=2)
         tools = tk.Frame(cache, bg=COLORS["card"])
         tools.pack(fill="x", padx=20, pady=(10, 8))
         tk.Label(tools, textvariable=self.cache_size_var, bg=COLORS["card_alt"], fg=COLORS["accent"], font=(FONT, 9, "bold"), padx=12, pady=8).pack(side="left")
@@ -3427,6 +3489,97 @@ class SettingsPage(tk.Frame):
         else:
             self.api_status_var.set(str(value or "连接测试未返回状态。"))
 
+    def _set_update_busy(self, busy: bool) -> None:
+        self.update_action_busy = busy
+        self.update_check_button.configure(
+            state="disabled" if busy else "normal",
+            cursor="arrow" if busy else "hand2",
+        )
+        can_install = not busy and self.available_update is not None and self.available_update.available
+        self.update_install_button.configure(
+            state="normal" if can_install else "disabled",
+            cursor="hand2" if can_install else "arrow",
+        )
+
+    def _check_for_update(self) -> None:
+        if self.update_action_busy:
+            self.update_status_var.set("更新操作正在进行，请稍候。")
+            return
+        self._set_update_busy(True)
+        self.update_status_var.set("正在从 GitHub 检查最新正式版本…")
+        self.update_results.expect()
+
+        def worker() -> None:
+            try:
+                self.update_results.deliver("check", self.update_check_callback(), None)
+            except Exception as exc:
+                self.update_results.deliver("check", None, exc)
+
+        threading.Thread(target=worker, daemon=True, name="github-update-check").start()
+
+    def _download_and_install_update(self) -> None:
+        info = self.available_update
+        if self.update_action_busy:
+            self.update_status_var.set("更新操作正在进行，请稍候。")
+            return
+        if info is None or not info.available:
+            self.update_status_var.set("请先检查更新。")
+            return
+        if not messagebox.askyesno(
+            "升级曜衡",
+            f"将下载并校验曜衡 {info.latest_version} 安装包。\n\n"
+            "校验通过后会打开覆盖安装程序并退出当前曜衡；用户设置和缓存默认保留。\n\n"
+            "是否继续？",
+        ):
+            return
+        self._set_update_busy(True)
+        self.update_status_var.set(f"正在下载曜衡 {info.latest_version} 并校验 SHA-256…")
+        self.update_results.expect()
+
+        def worker() -> None:
+            try:
+                self.update_results.deliver("download", self.update_download_callback(info), None)
+            except Exception as exc:
+                self.update_results.deliver("download", None, exc)
+
+        threading.Thread(target=worker, daemon=True, name="github-update-download").start()
+
+    def _finish_update_action(self, action: object, value: object, error: object) -> None:
+        self._set_update_busy(False)
+        if error is not None:
+            detail = str(error) if isinstance(error, UpdateError) else "发生未预期错误"
+            self.update_status_var.set(f"更新失败：{detail}")
+            return
+        if action == "check" and isinstance(value, UpdateInfo):
+            if value.available:
+                self.available_update = value
+                first_note = next(
+                    (line.lstrip("-# ").strip() for line in value.release_notes.splitlines() if line.strip()),
+                    "可下载新的正式版本",
+                )[:120]
+                self.update_status_var.set(
+                    f"发现曜衡 {value.latest_version} · {first_note}"
+                )
+            else:
+                self.available_update = None
+                self.update_status_var.set(
+                    f"当前已是最新版本 {APP_VERSION}（GitHub 最新：{value.latest_version}）"
+                )
+            self._set_update_busy(False)
+            return
+        if action == "download" and isinstance(value, DownloadedUpdate):
+            self.update_status_var.set(
+                f"曜衡 {value.info.latest_version} 已下载并通过 SHA-256 校验，正在打开覆盖安装程序…"
+            )
+            try:
+                self.update_idletasks()
+                self.update_install_callback(value)
+            except UpdateError as exc:
+                self.update_status_var.set(f"无法开始升级：{exc}")
+                self._set_update_busy(False)
+            return
+        self.update_status_var.set("更新操作没有返回有效结果。")
+
     def on_hide(self) -> None:
         # A plaintext token must not remain visible after leaving Settings.
         self.api_token_once_var.set("")
@@ -3495,6 +3648,7 @@ class SettingsPage(tk.Frame):
         if event.widget is self:
             self.api_token_once_var.set("")
             self.api_results.close()
+            self.update_results.close()
 
     def _bind_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<MouseWheel>", self._on_mousewheel, add="+")
@@ -3553,8 +3707,10 @@ class YaohengApp:
                 pass
         self.root.update_idletasks()
         self.window_icon_handles = set_windows_window_icon(self.root, icon)
+        self.restart_registered = register_windows_restart()
         self.service = RateService(self.settings.resolved_data_dir())
         self.service.set_cache_limit(self.settings.cache_limit_mb)
+        self.update_service = GitHubUpdateService()
         self.c2c_service = AppC2CService(self.service)
         self.exchange_coordinator = ExchangeCoordinator(self.service, self.c2c_service)
         self.local_api_command = CommandService(
@@ -3581,6 +3737,7 @@ class YaohengApp:
         self.auto_jobs: dict[str, str | None] = {"fiat": None, "crypto": None}
         self.geometry_job: str | None = None
         self.exiting = False
+        self.update_installing = False
         self.persistence_warning_shown = False
         self.rate_results = TkResultBridge(self.root, self._finish_rates)
         self._styles()
@@ -3737,6 +3894,7 @@ class YaohengApp:
             self.format_timestamp,
             colors=COLORS,
             font_name=FONT,
+            currency_selector_factory=SearchSelect,
         )
         self.pages["fiat"] = DualConverterPage(
             content, self.service, "fiat", self.refresh_rates, self.format_timestamp,
@@ -3775,6 +3933,9 @@ class YaohengApp:
             self.set_local_api_port,
             self.issue_local_api_token,
             self.test_local_api_connection,
+            self.check_application_update,
+            self.download_application_update,
+            self.install_application_update,
             self.force_exit,
         )
         for page in self.pages.values():
@@ -4269,6 +4430,21 @@ class YaohengApp:
             connection.close()
         return "连接测试失败：本机监听未返回有效健康状态。"
 
+    def check_application_update(self) -> UpdateInfo:
+        return self.update_service.check(APP_VERSION)
+
+    def download_application_update(self, info: UpdateInfo) -> DownloadedUpdate:
+        return self.update_service.download(info)
+
+    def install_application_update(self, download: DownloadedUpdate) -> None:
+        for page_widget in self.pages.values():
+            flush = getattr(page_widget, "flush_state", None)
+            if callable(flush):
+                flush()
+        self._persist_settings(notify=False)
+        self.update_service.launch_installer(download, portable_dir())
+        self.update_installing = True
+
     def _queue_geometry_save(self, _event: tk.Event | None = None) -> None:
         if not self.settings.remember_window_geometry or self.history_open or self.root.state() != "normal":
             return
@@ -4283,6 +4459,9 @@ class YaohengApp:
             self._persist_settings(notify=False)
 
     def on_close_request(self) -> None:
+        if getattr(self, "update_installing", False):
+            self.force_exit()
+            return
         if self.settings.close_action == "minimize" and not self.exiting:
             if self.history_open:
                 self.toggle_history()

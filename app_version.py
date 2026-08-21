@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-APP_VERSION = "3.18"
+APP_VERSION = "3.19"
 APP_NAME = "曜衡"
 APP_PRODUCT_NAME = "Yaoheng"
 APP_USER_AGENT = f"{APP_PRODUCT_NAME}/{APP_VERSION} (Windows)"

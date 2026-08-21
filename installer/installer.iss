@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.18"
+  #define AppVersion "3.19"
 #endif
 
 #define AppName "曜衡"
@@ -8,7 +8,13 @@
 #define ProjectUrl "https://github.com/alokxfox/yaoheng"
 
 [Setup]
+#ifdef UpgradeSmokeTest
+; Test-only identity keeps unattended upgrade validation isolated from a real
+; Yaoheng installation and its uninstall registry entry.
+AppId={{20F8D67B-55F8-48D7-91E1-04986C8CF8A3}
+#else
 AppId={{49A035BF-7BEC-4FE1-84C4-EEBFD503A917}
+#endif
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -18,6 +24,9 @@ AppSupportURL={#ProjectUrl}/issues
 AppUpdatesURL={#ProjectUrl}/releases/latest
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
+UsePreviousAppDir=yes
+UsePreviousGroup=yes
+UsePreviousTasks=yes
 DisableProgramGroupPage=yes
 AllowNoIcons=yes
 PrivilegesRequired=lowest
@@ -33,7 +42,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-RestartApplications=no
+RestartApplications=yes
 VersionInfoVersion={#AppVersion}.0.0
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} Windows 安装程序
@@ -52,6 +61,17 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\dist\曜衡\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+; Replace only packaged runtime files during an upgrade.  User-owned settings,
+; private token verifier, history and market cache are deliberately preserved.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\licenses"
+Type: files; Name: "{app}\{#AppExeName}"
+Type: files; Name: "{app}\使用说明.txt"
+Type: files; Name: "{app}\THIRD-PARTY-NOTICES.txt"
+Type: files; Name: "{app}\app.ico"
+Type: files; Name: "{app}\app.png"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

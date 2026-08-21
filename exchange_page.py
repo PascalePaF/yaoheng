@@ -17,6 +17,7 @@ from tkinter import ttk
 from typing import Any, Callable, Mapping, Sequence
 
 from c2c.models import DataState, Direction, QuoteRequest, QuoteResult, QuoteStatus
+from calculator_core import CalculationError, evaluate_basic_amount_decimal
 from conversion_core import (
     AmountInputError,
     canonical_amount_string,
@@ -657,6 +658,7 @@ class ExchangePage(tk.Frame):
         *,
         colors: Mapping[str, str],
         font_name: str = "Microsoft YaHei UI",
+        currency_selector_factory: Callable[..., tk.Widget] | None = None,
     ) -> None:
         super().__init__(master, bg=colors["bg"])
         self.coordinator = coordinator
@@ -666,6 +668,7 @@ class ExchangePage(tk.Frame):
         self.timestamp_formatter = timestamp_formatter
         self.colors = colors
         self.font_name = font_name
+        self.currency_selector_factory = currency_selector_factory
         self.snapshot: object | None = None
         self.from_cache = False
         self.visible = False
@@ -683,6 +686,7 @@ class ExchangePage(tk.Frame):
         self.status_var = tk.StringVar(value="普通边使用精确汇率；法币与虚拟币边可按金额查询 C2C。")
         self.card_frame: tk.Frame | None = None
         self.card_widgets: dict[int, tk.Frame] = {}
+        self.currency_selectors: dict[int, tk.Widget] = {}
         self.primary_entry: tk.Entry | None = None
         self.payment_by_label: dict[str, str] = {PAYMENT_ALL_LABEL: ""}
         self.result_bridge = _TkResultBridge(self, self._finish_quote)
@@ -791,11 +795,12 @@ class ExchangePage(tk.Frame):
         for child in self.card_frame.winfo_children():
             child.destroy()
         self.card_widgets.clear()
+        self.currency_selectors.clear()
         for column in range(3):
             self.card_frame.grid_columnconfigure(column, weight=1, uniform="exchange_cards")
         primary = self._make_card(self.card_frame, self.state.primary_slot, primary=True)
         self.card_widgets[self.state.primary_slot] = primary
-        primary.grid(row=0, column=1, sticky="nsew", padx=7, pady=(0, 9))
+        primary.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=7, pady=(0, 9))
         for index, slot in enumerate(self.state.target_slots):
             card = self._make_card(self.card_frame, slot, primary=False)
             self.card_widgets[slot] = card
@@ -840,13 +845,29 @@ class ExchangePage(tk.Frame):
             font=(self.font_name, 8, "bold"), padx=8, pady=4,
         ).grid(row=0, column=0, sticky="w")
         currency_var = tk.StringVar(value=self.code_to_display.get(self.state.currencies[slot], self.state.currencies[slot]))
-        combo = ttk.Combobox(
-            top, textvariable=currency_var,
-            values=tuple(self.code_to_display.get(code, code) for code in self.currency_values),
-            state="readonly", width=23, takefocus=True,
-        )
-        combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        combo.bind("<<ComboboxSelected>>", lambda _e, selected=slot, variable=currency_var: self._currency_changed(selected, variable.get()))
+        currency_displays = [self.code_to_display.get(code, code) for code in self.currency_values]
+        if self.currency_selector_factory is not None:
+            selector = self.currency_selector_factory(
+                top,
+                currency_var,
+                values=currency_displays,
+                command=lambda display, selected=slot: self._currency_changed(selected, display),
+                width=36 if primary else 23,
+                font_size=10 if primary else 9,
+                max_rows=9,
+            )
+            selector.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        else:
+            selector = ttk.Combobox(
+                top, textvariable=currency_var, values=tuple(currency_displays),
+                state="readonly", width=36 if primary else 23, takefocus=True,
+            )
+            selector.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+            selector.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, selected=slot, variable=currency_var: self._currency_changed(selected, variable.get()),
+            )
+        self.currency_selectors[slot] = selector
 
         if primary:
             self.primary_entry = tk.Entry(
@@ -854,14 +875,17 @@ class ExchangePage(tk.Frame):
                 insertbackground=self.colors["accent"], selectbackground=self.colors["selection"],
                 selectforeground=self.colors["selection_text"], font=("Segoe UI", 20, "bold"),
                 bd=0, highlightthickness=1, highlightbackground=self.colors["accent"],
-                highlightcolor=self.colors["accent"], takefocus=True,
+                highlightcolor=self.colors["accent"], takefocus=True, justify="left",
             )
             self.primary_entry.grid(row=1, column=0, sticky="ew", padx=14, pady=(2, 6), ipady=8)
-            self.primary_entry.bind("<Return>", lambda _e: self.recalculate_now())
-            self.primary_entry.bind("<KP_Enter>", lambda _e: self.recalculate_now())
-            self.primary_entry.bind("<FocusOut>", lambda _e: self.flush_state())
+            self.primary_entry.bind("<KeyPress>", self._amount_keypress)
+            self.primary_entry.bind("<Return>", self._commit_amount_expression)
+            self.primary_entry.bind("<KP_Enter>", self._commit_amount_expression)
+            self.primary_entry.bind("<FocusOut>", self._commit_amount_expression)
             tk.Label(
-                card, text=f"输入金额 · {self.state.primary_code}", bg=self.colors["card"],
+                card,
+                text=f"输入金额或算式 · {self.state.primary_code} · 支持 +  −  ×  ÷  %  和括号，按 Enter 计算",
+                bg=self.colors["card"],
                 fg=self.colors["muted"], font=(self.font_name, 8),
             ).grid(row=2, column=0, sticky="w", padx=14, pady=(0, 12))
             return card
@@ -973,6 +997,45 @@ class ExchangePage(tk.Frame):
         self._save_state()
         self._schedule_recalculate()
 
+    def _amount_keypress(self, event: tk.Event) -> str | None:
+        if event.char in {"=", "＝"}:
+            self.after_idle(self._commit_amount_expression)
+            return "break"
+        return None
+
+    def _evaluate_amount_expression(self, *, commit: bool) -> str | None:
+        raw = self.amount_var.get().strip()
+        if not raw:
+            self.state.set_amount("")
+            self.state.invalidate()
+            self._save_state()
+            self.status_var.set("请输入主货币金额或算式。")
+            self._refresh_target_cards()
+            return None
+        try:
+            amount = evaluate_basic_amount_decimal(raw)
+        except CalculationError as exc:
+            self.state.invalidate()
+            self.status_var.set(f"金额算式有误：{exc}")
+            self._refresh_target_cards()
+            return None
+        self.state.set_amount(amount)
+        if commit and raw != amount:
+            self._setting_amount = True
+            try:
+                self.amount_var.set(amount)
+            finally:
+                self._setting_amount = False
+        self._save_state()
+        return amount
+
+    def _commit_amount_expression(self, _event: tk.Event | None = None) -> str:
+        if self.closed:
+            return "break"
+        if self._evaluate_amount_expression(commit=True) is not None:
+            self.recalculate_now()
+        return "break"
+
     def _schedule_recalculate(self) -> None:
         if self.recalculate_job is not None:
             try:
@@ -991,7 +1054,13 @@ class ExchangePage(tk.Frame):
             except tk.TclError:
                 pass
         self.recalculate_job = None
-        if self.closed or self.snapshot is None:
+        if self.closed:
+            return "break"
+        amount = self._evaluate_amount_expression(commit=False)
+        if amount is None:
+            return "break"
+        if self.snapshot is None:
+            self.status_var.set(f"算式结果：{amount}；等待汇率数据。")
             return "break"
         kinds = _mapping_value(self.snapshot, "kinds", {})
         if not isinstance(kinds, Mapping):
@@ -1071,8 +1140,19 @@ class ExchangePage(tk.Frame):
             self.payment_generation += 1
             self._refresh_payment_options()
             self._save_state()
-            self._render_cards()
-            self._schedule_recalculate()
+            # SearchSelect invokes its command before it closes and restores
+            # focus.  Rebuilding the cards inside that callback would destroy
+            # the active selector mid-event, so finish the UI refresh at idle.
+            try:
+                self.after_idle(self._finish_currency_change)
+            except tk.TclError:
+                return
+
+    def _finish_currency_change(self) -> None:
+        if self.closed:
+            return
+        self._render_cards()
+        self._schedule_recalculate()
 
     def _set_primary(self, slot: int) -> None:
         change = self.state.set_primary(slot)

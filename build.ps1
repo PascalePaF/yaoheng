@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 $ProjectDir = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path))
 $AppName = -join @([char]26332, [char]34913)
-$AppVersion = "3.18"
+$AppVersion = "3.19"
 $ReleaseAssetStem = "Yaoheng-{0}-Windows-x64" -f $AppVersion
 $GuideName = (-join @([char]20351, [char]29992, [char]35828, [char]26126)) + ".txt"
 $ThirdPartyNoticeName = "THIRD-PARTY-NOTICES.txt"
@@ -213,6 +213,7 @@ try {
         "command_service.py",
         "local_api.py",
         "secret_store.py",
+        "update_service.py",
         "c2c",
         "make_icon.py",
         "tools",

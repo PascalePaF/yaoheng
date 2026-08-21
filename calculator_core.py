@@ -9,6 +9,7 @@ import operator
 import re
 import tokenize
 from dataclasses import dataclass, field
+from decimal import Decimal, DecimalException, localcontext
 from typing import Callable
 
 
@@ -416,24 +417,91 @@ class SafeEvaluator:
 _BASIC_AMOUNT_PATTERN = re.compile(r"[0-9\s,.()%+\-*/×÷−]+")
 
 
-def evaluate_basic_amount(expression: str) -> float:
-    """Evaluate a non-negative amount made only from basic arithmetic and modulo."""
-    text = expression.strip()
+def _normalize_basic_amount(expression: str) -> str:
+    text = _normalize_structural_characters(expression.strip())
     if text.endswith("="):
         text = text[:-1].rstrip()
     if not text or len(text) > 80 or not _BASIC_AMOUNT_PATTERN.fullmatch(text):
         raise CalculationError("仅支持数字、加减乘除、除余和括号")
-    normalized = _normalize_grouped_numbers(
-        text.replace("×", "*").replace("÷", "/").replace("−", "-")
-    )
+    normalized = _normalize_grouped_numbers(text)
     if "," in normalized:
         raise CalculationError("千位分隔符格式不正确")
     if "**" in normalized or "//" in normalized:
         raise CalculationError("仅支持数字、加减乘除、除余和括号")
+    # Python rejects decimal integers such as 0002, while a calculator treats
+    # them as an ordinary base-10 entry.
+    return re.sub(r"(?<![\w.])0+(?=\d)", "", normalized)
+
+
+def evaluate_basic_amount(expression: str) -> float:
+    """Evaluate a non-negative amount made only from basic arithmetic and modulo."""
+    normalized = _normalize_basic_amount(expression)
     value = SafeEvaluator().evaluate(normalized)
     if value < 0:
         raise CalculationError("金额不能小于零")
     return value
+
+
+def evaluate_basic_amount_decimal(expression: str) -> str:
+    """Evaluate a basic amount expression and return a canonical Decimal string.
+
+    Currency conversion must not reintroduce binary floating-point noise after
+    the exact Decimal conversion boundary.  This evaluator deliberately
+    supports only ``+ - * / %`` and parentheses, with a bounded Decimal
+    context for recurring divisions.
+    """
+
+    normalized = _normalize_basic_amount(expression)
+    try:
+        tree = ast.parse(normalized, mode="eval")
+    except (MemoryError, RecursionError, SyntaxError) as exc:
+        raise CalculationError("算式格式不正确") from exc
+
+    def visit(node: ast.AST) -> Decimal:
+        if isinstance(node, ast.Expression):
+            return visit(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+            literal = ast.get_source_segment(normalized, node) or str(node.value)
+            try:
+                return Decimal(literal)
+            except DecimalException as exc:
+                raise CalculationError("算式包含无效数字") from exc
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = visit(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod)):
+            left = visit(node.left)
+            right = visit(node.right)
+            try:
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
+                if isinstance(node.op, ast.Div):
+                    return left / right
+                return left % right
+            except (DecimalException, ZeroDivisionError) as exc:
+                raise CalculationError("不能除以零") from exc
+        raise CalculationError("仅支持数字、加减乘除、除余和括号")
+
+    try:
+        with localcontext() as context:
+            context.prec = 34
+            result = visit(tree)
+    except CalculationError:
+        raise
+    except (DecimalException, MemoryError, OverflowError, RecursionError) as exc:
+        raise CalculationError("结果超出可表示范围") from exc
+    if result < 0:
+        raise CalculationError("金额不能小于零")
+    try:
+        from conversion_core import canonical_amount_string
+
+        return canonical_amount_string(result)
+    except (ValueError, DecimalException) as exc:
+        raise CalculationError("结果超出可表示范围") from exc
 
 
 @dataclass
