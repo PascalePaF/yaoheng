@@ -138,7 +138,9 @@ class SecretStoreTests(unittest.TestCase):
         real_replace = os.replace
 
         def fail_primary(source, target):
-            if Path(target) == self.path:
+            # SecretStore resolves its path at construction; Windows CI can
+            # expand an 8.3 temporary-directory alias to a long path.
+            if Path(target) == store.path:
                 raise OSError("simulated replace failure")
             return real_replace(source, target)
 

@@ -165,6 +165,15 @@ def register_windows_restart() -> bool:
         return False
 
 
+def format_chinese_datetime(value: datetime) -> str:
+    """Format a timestamp without passing CJK text through the OS locale codec."""
+
+    return (
+        f"{value.year:04d}年{value.month:02d}月{value.day:02d}日 "
+        f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+    )
+
+
 def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
     """Bind both Windows taskbar icon sizes to the same 曜衡 ICO asset."""
     if sys.platform != "win32" or not icon_path.exists():
@@ -3628,7 +3637,7 @@ class SettingsPage(tk.Frame):
                 self.timezone_options_hour = hour
         zone = self.settings.timezone if self.settings.timezone in self.zone_infos else "UTC"
         local = utc_now.astimezone(self.zone_infos.get(zone, ZoneInfo("UTC")))
-        self.timezone_clock_var.set(f"所选时区当前时间：{local:%Y年%m月%d日 %H:%M:%S}")
+        self.timezone_clock_var.set(f"所选时区当前时间：{format_chinese_datetime(local)}")
         self.timezone_job = self.after(1000, self._update_timezone_time)
 
     def _set_timezone(self, display: str) -> None:
@@ -3636,7 +3645,7 @@ class SettingsPage(tk.Frame):
         if zone in self.zones:
             self.timezone_callback(zone)
             local = datetime.now(self.zone_infos[zone])
-            self.timezone_clock_var.set(f"所选时区当前时间：{local:%Y年%m月%d日 %H:%M:%S}")
+            self.timezone_clock_var.set(f"所选时区当前时间：{format_chinese_datetime(local)}")
 
     def _destroy_jobs(self, event: tk.Event) -> None:
         if event.widget is self and self.timezone_job is not None:
@@ -3955,7 +3964,7 @@ class YaohengApp:
     def format_timestamp(self, value: str) -> str:
         try:
             stamp = datetime.fromisoformat(value)
-            return stamp.astimezone(ZoneInfo(self.settings.timezone)).strftime("%Y年%m月%d日 %H:%M:%S")
+            return format_chinese_datetime(stamp.astimezone(ZoneInfo(self.settings.timezone)))
         except (ValueError, KeyError, TypeError, OverflowError, OSError):
             return "时间未知"
 

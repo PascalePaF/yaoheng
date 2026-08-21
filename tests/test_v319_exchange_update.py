@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import requests
 
-from app_ui import SearchSelect, YaohengApp
+from app_ui import SearchSelect, YaohengApp, format_chinese_datetime
 from calculator_core import CalculationError, evaluate_basic_amount_decimal
 from exchange_page import ExchangePage
 from rate_service import RateSnapshot
@@ -109,6 +109,10 @@ class DecimalAmountExpressionTests(unittest.TestCase):
             with self.subTest(expression=expression):
                 with self.assertRaises(CalculationError):
                     evaluate_basic_amount_decimal(expression)
+
+    def test_chinese_timestamp_format_is_locale_independent(self):
+        value = datetime(2026, 8, 21, 9, 7, 5).astimezone()
+        self.assertEqual(format_chinese_datetime(value), "2026年08月21日 09:07:05")
 
 
 class GitHubUpdateServiceTests(unittest.TestCase):
