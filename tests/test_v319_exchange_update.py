@@ -73,7 +73,7 @@ def release_metadata(installer_hash: str, *, installer_url: str | None = None) -
             "tag_name": "v3.19",
             "name": "曜衡 3.19",
             "body": "V3.19 update fixture",
-            "html_url": "https://github.com/alokxfox/yaoheng/releases/tag/v3.19",
+            "html_url": "https://github.com/PascalePaF/yaoheng/releases/tag/v3.19",
             "published_at": "2026-08-21T00:00:00Z",
             "draft": False,
             "prerelease": False,
@@ -84,13 +84,13 @@ def release_metadata(installer_hash: str, *, installer_url: str | None = None) -
                     "size": 1024 * 1024,
                     "digest": f"sha256:{installer_hash}",
                     "browser_download_url": installer_url
-                    or f"https://github.com/alokxfox/yaoheng/releases/download/v3.19/{installer_name}",
+                    or f"https://github.com/PascalePaF/yaoheng/releases/download/v3.19/{installer_name}",
                 },
                 {
                     "name": "SHA256SUMS.txt",
                     "state": "uploaded",
                     "size": 104,
-                    "browser_download_url": "https://github.com/alokxfox/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
+                    "browser_download_url": "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
                 },
             ],
         },
@@ -130,7 +130,7 @@ class GitHubUpdateServiceTests(unittest.TestCase):
                 FakeResponse(release_metadata(checksum), LATEST_RELEASE_API),
                 FakeResponse(
                     checksum_payload,
-                    "https://github.com/alokxfox/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
+                    "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
                 ),
             ]
         )
@@ -176,7 +176,7 @@ class GitHubUpdateServiceTests(unittest.TestCase):
                 FakeResponse(release_metadata(checksum), LATEST_RELEASE_API),
                 FakeResponse(
                     checksum_payload,
-                    "https://github.com/alokxfox/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
+                    "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/SHA256SUMS.txt",
                 ),
             ]
         )
@@ -188,12 +188,12 @@ class GitHubUpdateServiceTests(unittest.TestCase):
         digest = hashlib.sha256(payload).hexdigest()
         asset = ReleaseAsset(
             "Yaoheng-3.19-Windows-x64-Setup.exe",
-            "https://github.com/alokxfox/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
+            "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
             len(payload),
             digest,
         )
         info = UpdateInfo(
-            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/alokxfox/yaoheng/releases/tag/v3.19", "", asset,
+            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/PascalePaF/yaoheng/releases/tag/v3.19", "", asset,
         )
         response = FakeResponse(
             payload,
@@ -210,12 +210,12 @@ class GitHubUpdateServiceTests(unittest.TestCase):
         payload = b"wrong-installer" * 80_000
         asset = ReleaseAsset(
             "Yaoheng-3.19-Windows-x64-Setup.exe",
-            "https://github.com/alokxfox/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
+            "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
             len(payload),
             "f" * 64,
         )
         info = UpdateInfo(
-            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/alokxfox/yaoheng/releases/tag/v3.19", "", asset,
+            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/PascalePaF/yaoheng/releases/tag/v3.19", "", asset,
         )
         service = GitHubUpdateService(
             FakeSession(
@@ -239,12 +239,12 @@ class GitHubUpdateServiceTests(unittest.TestCase):
         digest = hashlib.sha256(payload).hexdigest()
         asset = ReleaseAsset(
             "Yaoheng-3.19-Windows-x64-Setup.exe",
-            "https://github.com/alokxfox/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
+            "https://github.com/PascalePaF/yaoheng/releases/download/v3.19/Yaoheng-3.19-Windows-x64-Setup.exe",
             len(payload),
             digest,
         )
         info = UpdateInfo(
-            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/alokxfox/yaoheng/releases/tag/v3.19", "", asset,
+            "3.18", "3.19", "曜衡 3.19", "", "https://github.com/PascalePaF/yaoheng/releases/tag/v3.19", "", asset,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / asset.name

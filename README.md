@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/alokxfox/yaoheng/releases/latest"><img src="https://img.shields.io/github/v/release/alokxfox/yaoheng?display_name=tag&sort=semver" alt="Latest release"></a>
-  <a href="https://github.com/alokxfox/yaoheng/actions/workflows/tests.yml"><img src="https://github.com/alokxfox/yaoheng/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/PascalePaF/yaoheng/releases/latest"><img src="https://img.shields.io/github/v/release/PascalePaF/yaoheng?display_name=tag&sort=semver" alt="Latest release"></a>
+  <a href="https://github.com/PascalePaF/yaoheng/actions/workflows/tests.yml"><img src="https://github.com/PascalePaF/yaoheng/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4?logo=windows" alt="Windows 10 / 11">
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
 </p>
@@ -23,7 +23,7 @@
 
 ## 下载
 
-前往 [最新 Release](https://github.com/alokxfox/yaoheng/releases/latest) 下载：
+前往 [最新 Release](https://github.com/PascalePaF/yaoheng/releases/latest) 下载：
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
@@ -127,7 +127,7 @@ C2C 兑换、市场兑换、货币、虚拟币和两个行情页会分别保存�
 需要 Python 3.11 或更高版本。
 
 ```powershell
-git clone https://github.com/alokxfox/yaoheng.git
+git clone https://github.com/PascalePaF/yaoheng.git
 cd yaoheng
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -180,7 +180,7 @@ build.ps1                完整发布构建
 
 ## 参与改进
 
-欢迎通过 [Issues](https://github.com/alokxfox/yaoheng/issues) 提交可复现问题。请附 Windows/曜衡版本、复现步骤、预期和实际结果；不要上传个人设置、缓存或令牌文件。
+欢迎通过 [Issues](https://github.com/PascalePaF/yaoheng/issues) 提交可复现问题。请附 Windows/曜衡版本、复现步骤、预期和实际结果；不要上传个人设置、缓存或令牌文件。
 
 版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 

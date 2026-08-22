@@ -4,8 +4,8 @@
 
 #define AppName "曜衡"
 #define AppExeName "曜衡.exe"
-#define AppPublisher "alokxfox"
-#define ProjectUrl "https://github.com/alokxfox/yaoheng"
+#define AppPublisher "PascalePaF"
+#define ProjectUrl "https://github.com/PascalePaF/yaoheng"
 
 [Setup]
 #ifdef UpgradeSmokeTest

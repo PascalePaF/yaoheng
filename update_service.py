@@ -19,7 +19,7 @@ import requests
 from app_version import APP_USER_AGENT, APP_VERSION
 
 
-REPOSITORY = "alokxfox/yaoheng"
+REPOSITORY = "PascalePaF/yaoheng"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RELEASE_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
 MAX_METADATA_BYTES = 2 * 1024 * 1024
