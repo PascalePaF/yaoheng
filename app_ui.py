@@ -4353,9 +4353,15 @@ class YaohengApp:
         self.update_installing = False
         self.persistence_warning_shown = False
         self.sidebar_compact: bool | None = None
+        self._theme_bindings: list[tuple[tk.Misc, tuple[tuple[str, str], ...], str | None]] = []
+        self._themed_selects: list[tuple[SearchSelect, str | None]] = []
+        self._themed_palette_pickers: list[ThemePalettePicker] = []
+        self._themed_calculator_keys: list[tuple[CalculatorKey, str | None]] = []
+        self._theme_idle_job: str | None = None
         self.rate_results = TkResultBridge(self.root, self._finish_rates)
         self._styles()
         self._shell()
+        self._prepare_theme_bindings(dict(COLORS))
         start_page = self.settings.last_page if self.settings.remember_last_page else self.settings.startup_page
         self.show_page(start_page if start_page in self.pages else "calculator")
         self.root.bind_all("<KeyPress>", self.on_key, add="+")
@@ -5310,19 +5316,11 @@ class YaohengApp:
         except OSError as exc:
             messagebox.showerror("无法打开文件夹", str(exc))
 
-    def set_theme(self, theme: str) -> None:
-        if theme not in THEMES or theme == self.settings.theme:
-            return
-        started = time.perf_counter()
-        old = dict(COLORS)
-        self.settings.theme = theme
-        # Keep the visual switch independent of disk latency. The debounced
-        # snapshot is flushed synchronously during normal application exit.
-        self.settings_store.schedule_save(self.settings)
-        COLORS.clear()
-        COLORS.update(THEMES[theme])
+    def _prepare_theme_bindings(self, palette: Mapping[str, str]) -> None:
+        """Resolve widget color roles once so every later switch stays instant."""
+
         keys_by_color: dict[str, list[str]] = {}
-        for key, value in old.items():
+        for key, value in palette.items():
             keys_by_color.setdefault(value, []).append(key)
 
         def belongs_to(widget: tk.Misc, ancestor: tk.Misc) -> bool:
@@ -5356,13 +5354,13 @@ class YaohengApp:
                     ("display_bg", "display_text"),
                 )
                 for background_role, text_role in contextual_text:
-                    if widget_background == old.get(background_role) and value == old.get(text_role):
+                    if widget_background == palette.get(background_role) and value == palette.get(text_role):
                         return text_role
                 for preferred in (
                     "muted", "subtle", "accent", "text", "sidebar_muted", "sidebar_text",
                     "input_text", "button_text", "key_text", "display_expression", "display_text",
                 ):
-                    if value == old.get(preferred):
+                    if value == palette.get(preferred):
                         return preferred
             if len(candidates) == 1:
                 return candidates[0]
@@ -5380,21 +5378,33 @@ class YaohengApp:
         )
 
         supported_options: dict[type[object], tuple[str, ...]] = {}
-        themed_selects: list[SearchSelect] = []
-        themed_palette_pickers: list[ThemePalettePicker] = []
-        themed_calculator_keys: list[CalculatorKey] = []
+        self._theme_bindings.clear()
+        self._themed_selects.clear()
+        self._themed_palette_pickers.clear()
+        self._themed_calculator_keys.clear()
+        page_by_identity = {id(page): key for key, page in self.pages.items()}
 
-        def recolor(widget: tk.Misc) -> None:
+        def owner_page(widget: tk.Misc) -> str | None:
+            current: tk.Misc | None = widget
+            while current is not None:
+                page_key = page_by_identity.get(id(current))
+                if page_key is not None:
+                    return page_key
+                current = getattr(current, "master", None)
+            return None
+
+        def capture(widget: tk.Misc) -> None:
+            page_key = owner_page(widget)
             if isinstance(widget, SearchSelect):
-                themed_selects.append(widget)
+                self._themed_selects.append((widget, page_key))
                 return
             if isinstance(widget, ThemePalettePicker):
-                themed_palette_pickers.append(widget)
+                self._themed_palette_pickers.append(widget)
                 return
             if isinstance(widget, CalculatorKey):
-                themed_calculator_keys.append(widget)
+                self._themed_calculator_keys.append((widget, page_key))
                 return
-            changes: dict[str, str] = {}
+            roles: list[tuple[str, str]] = []
             widget_type = type(widget)
             options = supported_options.get(widget_type)
             if options is None:
@@ -5408,29 +5418,108 @@ class YaohengApp:
                 try:
                     current = str(widget.cget(option))
                     key = theme_key(widget, option, current)
-                    if key and key in COLORS:
-                        changes[option] = COLORS[key]
+                    if key and key in palette:
+                        roles.append((option, key))
                 except (tk.TclError, TypeError):
                     continue
-            if changes:
-                try:
-                    widget.configure(**changes)
-                except (tk.TclError, TypeError):
-                    pass
+            if roles:
+                self._theme_bindings.append((widget, tuple(roles), page_key))
             for child in widget.winfo_children():
-                recolor(child)
+                capture(child)
 
-        self.root.configure(bg=COLORS["bg"])
-        recolor(self.root)
+        capture(self.root)
+
+    def _apply_theme_bindings(self, *, all_pages: bool = False) -> None:
+        """Apply ordinary widget colors in one Tcl batch instead of thousands of calls."""
+
+        commands: list[str] = []
+        active_bindings: list[tuple[tk.Misc, tuple[tuple[str, str], ...]]] = []
+        for widget, roles, page_key in self._theme_bindings:
+            if not all_pages and page_key is not None and page_key != self.current_page:
+                continue
+            try:
+                if not widget.winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            arguments = [str(widget), "configure"]
+            for option, role in roles:
+                arguments.extend((f"-{option}", COLORS[role]))
+            commands.append(" ".join(arguments))
+            active_bindings.append((widget, roles))
+        if commands:
+            try:
+                self.root.tk.eval("\n".join(commands))
+            except tk.TclError:
+                # A dynamically destroyed widget should not leave the rest of
+                # the interface on the old palette. Retry valid widgets alone.
+                for widget, roles in active_bindings:
+                    try:
+                        widget.configure(**{option: COLORS[role] for option, role in roles})
+                    except (tk.TclError, TypeError):
+                        continue
+
+    def _apply_theme_specials(self, *, all_pages: bool = False) -> None:
+        for select, page_key in self._themed_selects:
+            if all_pages or page_key is None or page_key == self.current_page:
+                select.apply_theme()
+        # The picker must expose the selected name synchronously even while
+        # Settings is hidden; its collapsed header is deliberately lightweight.
+        if not all_pages:
+            for picker in self._themed_palette_pickers:
+                picker.set_theme(self.settings.theme)
+        for calculator_key, page_key in self._themed_calculator_keys:
+            if all_pages or page_key is None or page_key == self.current_page:
+                calculator_key.apply_theme()
+
+    def _apply_financial_theme(self, *, all_pages: bool = False) -> None:
+        for key in ("fiat", "crypto"):
+            if not all_pages and key != self.current_page:
+                continue
+            page = self.pages.get(key)
+            if isinstance(page, DualConverterPage):
+                page.table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
+                page.table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
+                page._show_row_actions()
+        for key in ("fiat_market", "market"):
+            if not all_pages and key != self.current_page:
+                continue
+            market = self.pages.get(key)
+            if isinstance(market, MarketPage):
+                market.watch_table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
+                market.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
+                market.watch_table.tag_configure("flat", background=COLORS["card_alt"], foreground=COLORS["text"])
+                market.chart.configure(bg=COLORS["card"])
+                market._highlight_days()
+                try:
+                    self.root.after_idle(market.chart.redraw)
+                except tk.TclError:
+                    pass
+
+    def _finish_deferred_theme(self) -> None:
+        self._theme_idle_job = None
+        if self.exiting:
+            return
+        self._apply_theme_bindings(all_pages=True)
+        self._apply_theme_specials(all_pages=True)
+        self._apply_financial_theme(all_pages=True)
+
+    def set_theme(self, theme: str) -> None:
+        if theme not in THEMES or theme == self.settings.theme:
+            return
+        started = time.perf_counter()
+        self.settings.theme = theme
+        # Keep the visual switch independent of disk latency. The debounced
+        # snapshot is flushed synchronously during normal application exit.
+        self.settings_store.schedule_save(self.settings)
+        COLORS.clear()
+        COLORS.update(THEMES[theme])
+
+        self._apply_theme_bindings()
         self._styles()
         self._draw_logo()
 
-        for select in themed_selects:
-            select.apply_theme()
-        for picker in themed_palette_pickers:
-            picker.set_theme(theme)
-        for calculator_key in themed_calculator_keys:
-            calculator_key.apply_theme()
+        self._apply_theme_specials()
         for key, button in self.nav_buttons.items():
             active = key == self.current_page
             button.configure(
@@ -5447,24 +5536,16 @@ class YaohengApp:
         if isinstance(settings_page, SettingsPage):
             settings_page.theme_var.set(theme_label(theme, self.settings.language))
             settings_page.theme_cycle_var.set(settings_page._theme_cycle_text(theme))
-        for key in ("fiat", "crypto"):
-            page = self.pages.get(key)
-            if isinstance(page, DualConverterPage):
-                page.table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
-                page.table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
-                page._show_row_actions()
-        for key in ("fiat_market", "market"):
-            market = self.pages.get(key)
-            if isinstance(market, MarketPage):
-                market.watch_table.tag_configure("up", background=COLORS["up_row"], foreground=COLORS["text"])
-                market.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
-                market.watch_table.tag_configure("flat", background=COLORS["card_alt"], foreground=COLORS["text"])
-                market.chart.configure(bg=COLORS["card"])
-                market._highlight_days()
-                try:
-                    self.root.after_idle(market.chart.redraw)
-                except tk.TclError:
-                    pass
+        self._apply_financial_theme()
+        if self._theme_idle_job is not None:
+            try:
+                self.root.after_cancel(self._theme_idle_job)
+            except tk.TclError:
+                pass
+        try:
+            self._theme_idle_job = self.root.after_idle(self._finish_deferred_theme)
+        except tk.TclError:
+            self._theme_idle_job = None
         self.last_theme_switch_ms = (time.perf_counter() - started) * 1000
 
     def set_language(self, language: str) -> None:
