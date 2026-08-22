@@ -130,6 +130,18 @@ def _optional_stat(value: object, *, integer: bool = False, maximum: str | None 
     return text
 
 
+def _completion_stat(value: object) -> str | None:
+    text = _optional_stat(value, maximum="100")
+    if text is None:
+        return None
+    parsed = parse_amount(text)
+    # The current public ad-list schema returns a 0..1 ratio, while older
+    # official payloads used 0..100 percentages.  Preserve both contracts.
+    if parsed <= 1:
+        return decimal_to_canonical(parsed * Decimal(100))
+    return text
+
+
 def parse_binance_trade_methods(payload: object) -> tuple[PaymentMethod, ...]:
     rows = _list_data(
         _unwrap(payload),
@@ -200,7 +212,7 @@ def _parse_binance_ad(row: object, request: QuoteRequest) -> NormalizedAd:
     )
     if orders is None:
         orders = _field(ad, ("monthOrderCount", "orderCount"))
-    completion = _optional_stat(completion, maximum="100")
+    completion = _completion_stat(completion)
     orders = _optional_stat(orders, integer=True)
 
     try:
@@ -216,15 +228,33 @@ def _parse_binance_ad(row: object, request: QuoteRequest) -> NormalizedAd:
             price=_field(ad, ("price", "unitPrice", "quotePrice")),
             min_fiat=_field(
                 ad,
-                ("minSingleTransAmount", "minAmount", "minLimit", "minFiatAmount"),
+                (
+                    "minTransAmount",
+                    "minSingleTransAmount",
+                    "minAmount",
+                    "minLimit",
+                    "minFiatAmount",
+                ),
             ),
             max_fiat=_field(
                 ad,
-                ("maxSingleTransAmount", "maxAmount", "maxLimit", "maxFiatAmount"),
+                (
+                    "maxTransAmount",
+                    "maxSingleTransAmount",
+                    "maxAmount",
+                    "maxLimit",
+                    "maxFiatAmount",
+                ),
             ),
             available_asset=_field(
                 ad,
-                ("surplusAmount", "availableAmount", "availableAsset", "assetAmount"),
+                (
+                    "tradableAmount",
+                    "surplusAmount",
+                    "availableAmount",
+                    "availableAsset",
+                    "assetAmount",
+                ),
             ),
             payment_methods=payments,
             completion_rate=completion,

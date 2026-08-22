@@ -24,6 +24,7 @@ from conversion_core import (
     normalize_currency_code,
 )
 from rate_service import portable_dir
+from theme_catalog import SUPPORTED_THEME_NAMES
 
 
 FALLBACK_TIMEZONES = [
@@ -816,9 +817,7 @@ class SettingsStore:
             raise TypeError("设置对象类型无效")
         defaults = AppSettings()
         zone_names = set(_cached_timezone_names())
-        if not isinstance(settings.theme, str) or settings.theme not in {
-            "dark", "light", "ocean", "forest", "plum"
-        }:
+        if not isinstance(settings.theme, str) or settings.theme not in SUPPORTED_THEME_NAMES:
             settings.theme = defaults.theme
         if not isinstance(settings.timezone, str) or settings.timezone not in zone_names:
             settings.timezone = defaults.timezone

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.20"
+  #define AppVersion "3.20.1"
 #endif
 
 #define AppName "曜衡"

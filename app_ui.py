@@ -39,153 +39,10 @@ from local_api import LocalAPIError, LocalAPIPortInUseError, LocalAPIServer
 from rate_service import RateService, RateSnapshot, crypto_display_name, fiat_display_name, fiat_region, portable_dir, relative_rate_change
 from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
+from theme_catalog import THEME_LABELS, THEMES
 from update_service import DownloadedUpdate, GitHubUpdateService, UpdateError, UpdateInfo
 
 
-THEMES = {
-    "dark": {
-    "bg": "#090909",
-    "sidebar": "#101010",
-    "card": "#171717",
-    "card_alt": "#202020",
-    "key": "#262626",
-    "key_hover": "#343434",
-    "muted_key": "#353535",
-    "accent": "#FF9D2E",
-    "accent_hover": "#FFB45C",
-    "accent_dark": "#3B2612",
-    "text": "#F7F7F7",
-    "muted": "#9B9B9B",
-    "line": "#303030",
-    "up": "#35CF8B",
-    "down": "#FF5F67",
-    "on_accent": "#17100A",
-    "subtle": "#858585",
-    "grid": "#282828",
-    "up_fill": "#11251D",
-    "down_fill": "#2A1517",
-    "up_row": "#176A46",
-    "down_row": "#812D36",
-    "tooltip": "#272727",
-    "selection": "#B8DDFC",
-    "selection_text": "#102436",
-    },
-    "light": {
-    "bg": "#F1F3F6",
-    "sidebar": "#FFFFFF",
-    "card": "#FFFFFF",
-    "card_alt": "#F6F7F9",
-    "key": "#E6E9ED",
-    "key_hover": "#D8DCE2",
-    "muted_key": "#D9DDE2",
-    "accent": "#B44100",
-    "accent_hover": "#C94F00",
-    "accent_dark": "#FFE3CF",
-    "text": "#17191C",
-    "muted": "#68707C",
-    "line": "#D3D8DE",
-    "up": "#08653E",
-    "down": "#A91F2C",
-    "on_accent": "#FFFFFF",
-    "subtle": "#646C78",
-    "grid": "#E4E7EB",
-    "up_fill": "#E2F5EC",
-    "down_fill": "#FCE7E9",
-    "up_row": "#C7EAD8",
-    "down_row": "#F2C8CE",
-    "tooltip": "#FFFFFF",
-    "selection": "#B8DDFC",
-    "selection_text": "#102436",
-    },
-    "ocean": {
-    "bg": "#06131F",
-    "sidebar": "#0A1B2A",
-    "card": "#10283B",
-    "card_alt": "#17364D",
-    "key": "#1D4059",
-    "key_hover": "#28526E",
-    "muted_key": "#24465D",
-    "accent": "#52C7FF",
-    "accent_hover": "#83D7FF",
-    "accent_dark": "#103C57",
-    "text": "#F4FAFF",
-    "muted": "#A1B9C9",
-    "line": "#2A526B",
-    "up": "#55D6A1",
-    "down": "#FF7A87",
-    "on_accent": "#062235",
-    "subtle": "#86A5B8",
-    "grid": "#1D3B50",
-    "up_fill": "#123D35",
-    "down_fill": "#44232D",
-    "up_row": "#17684F",
-    "down_row": "#7B3341",
-    "tooltip": "#17364D",
-    "selection": "#9EDCFF",
-    "selection_text": "#082237",
-    },
-    "forest": {
-    "bg": "#08140F",
-    "sidebar": "#0D1D16",
-    "card": "#142A20",
-    "card_alt": "#1C382B",
-    "key": "#244936",
-    "key_hover": "#315D46",
-    "muted_key": "#2B4D3C",
-    "accent": "#F1B84B",
-    "accent_hover": "#FFD06F",
-    "accent_dark": "#443518",
-    "text": "#F5FBF7",
-    "muted": "#A6BCAE",
-    "line": "#345944",
-    "up": "#55D68B",
-    "down": "#FF7D76",
-    "on_accent": "#261B06",
-    "subtle": "#8EA899",
-    "grid": "#274435",
-    "up_fill": "#153C2A",
-    "down_fill": "#472522",
-    "up_row": "#1D6D49",
-    "down_row": "#803B39",
-    "tooltip": "#1C382B",
-    "selection": "#BDE9CE",
-    "selection_text": "#10281B",
-    },
-    "plum": {
-    "bg": "#130C19",
-    "sidebar": "#1B1024",
-    "card": "#291936",
-    "card_alt": "#372247",
-    "key": "#472D59",
-    "key_hover": "#5A3A70",
-    "muted_key": "#503662",
-    "accent": "#D9A0FF",
-    "accent_hover": "#E7C1FF",
-    "accent_dark": "#4A285F",
-    "text": "#FCF7FF",
-    "muted": "#C1AACD",
-    "line": "#604475",
-    "up": "#64D69B",
-    "down": "#FF7E9A",
-    "on_accent": "#281133",
-    "subtle": "#AB92B8",
-    "grid": "#422F51",
-    "up_fill": "#183D31",
-    "down_fill": "#4C2637",
-    "up_row": "#227051",
-    "down_row": "#84364E",
-    "tooltip": "#372247",
-    "selection": "#E5C7F5",
-    "selection_text": "#2B1636",
-    },
-}
-THEME_LABELS = {
-    "dark": "深夜橙",
-    "light": "明亮橙",
-    "ocean": "深海蓝",
-    "forest": "森林绿",
-    "plum": "暮色紫",
-}
 COLORS = dict(THEMES["dark"])
 
 FONT = "Microsoft YaHei UI"
@@ -1215,9 +1072,31 @@ class CalculatorPage(tk.Frame):
             self.expression_entry.selection_range(0, tk.END)
 
     def _expression_keypress(self, event: tk.Event) -> str | None:
-        if normalize_amount_input(event.char) == "=":
+        if int(getattr(event, "state", 0)) & 0x000C:
+            return None
+        raw_char = str(getattr(event, "char", ""))
+        normalized = normalize_amount_input(raw_char)
+        if normalized == "=":
             self.after_jobs.schedule(0, self._evaluate_manual_expression, idle=True)
             return "break"
+        if normalized and normalized != raw_char:
+            self.expression_entry.insert(tk.INSERT, normalized)
+            return "break"
+        if not raw_char:
+            keysym = str(getattr(event, "keysym", ""))
+            keypad = {
+                **{f"KP_{digit}": digit for digit in "0123456789"},
+                "KP_Add": "+",
+                "KP_Subtract": "-",
+                "KP_Multiply": "*",
+                "KP_Divide": "/",
+                "KP_Decimal": ".",
+                "KP_Separator": ".",
+            }
+            token = keypad.get(keysym)
+            if token is not None:
+                self.expression_entry.insert(tk.INSERT, token)
+                return "break"
         return None
 
     def _manual_expression_changed(self, *_args) -> None:
@@ -1249,6 +1128,19 @@ class CalculatorPage(tk.Frame):
         self.expression_var.set(expression)
         self._updating_expression = False
         self.result_var.set(self.model.preview() or "0")
+
+    def on_show(self) -> None:
+        try:
+            self.after_idle(self._focus_expression)
+        except tk.TclError:
+            pass
+
+    def _focus_expression(self) -> None:
+        try:
+            self.expression_entry.focus_set()
+            self.expression_entry.icursor(tk.END)
+        except tk.TclError:
+            pass
 
     def _destroy_jobs(self, event: tk.Event) -> None:
         if event.widget is self:
@@ -3215,7 +3107,11 @@ class SettingsPage(tk.Frame):
         self.update_download_callback = update_download_callback
         self.update_install_callback = update_install_callback
         self.exit_callback = exit_callback
-        self.theme_var = tk.StringVar(value=settings.theme)
+        self.theme_display_to_name = {label: name for name, label in THEME_LABELS.items()}
+        self.theme_name_to_display = dict(THEME_LABELS)
+        self.theme_var = tk.StringVar(
+            value=self.theme_name_to_display.get(settings.theme, THEME_LABELS["dark"])
+        )
         self.timezone_var = tk.StringVar()
         self.timezone_clock_var = tk.StringVar()
         self.keep_var = tk.BooleanVar(value=settings.keep_data_with_app)
@@ -3254,7 +3150,7 @@ class SettingsPage(tk.Frame):
         self.timezone_values = self._timezone_displays()
         self.timezone_options_hour = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d%H")
         self.timezone_var.set(self.zone_name_to_display.get(settings.timezone, settings.timezone))
-        self.theme_buttons: dict[str, AppButton] = {}
+        self.theme_preview: dict[str, tk.Frame] = {}
         self._build()
         self.refresh_cache_size()
         self.timezone_job: str | None = None
@@ -3285,15 +3181,45 @@ class SettingsPage(tk.Frame):
         body.bind("<Configure>", lambda _e: self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
         self.settings_canvas.bind("<Configure>", lambda e: self.settings_canvas.itemconfigure(self.settings_window, width=e.width))
 
-        appearance = self._card(body, "外观主题", "五套高对比度主题即时切换，布局与字号保持不变", 0, 0)
+        appearance = self._card(
+            body,
+            "外观主题",
+            f"{len(THEMES)} 套低刺激主题即时切换，布局与字号保持不变",
+            0,
+            0,
+        )
         theme_row = tk.Frame(appearance, bg=COLORS["card"])
-        theme_row.pack(fill="x", padx=20, pady=(12, 18))
-        for column in range(3):
-            theme_row.grid_columnconfigure(column, weight=1, uniform="theme_buttons")
-        for index, (value, label) in enumerate(THEME_LABELS.items()):
-            button = AppButton(theme_row, ("●  " if value == self.settings.theme else "○  ") + label, lambda selected=value: self._set_theme(selected), "outline" if value == self.settings.theme else "ghost", 10)
-            button.grid(row=index // 3, column=index % 3, sticky="ew", padx=4, pady=4, ipady=6)
-            self.theme_buttons[value] = button
+        theme_row.pack(fill="x", padx=20, pady=(12, 8))
+        self.theme_combo = SearchSelect(
+            theme_row,
+            self.theme_var,
+            values=list(THEME_LABELS.values()),
+            command=self._set_theme,
+            width=34,
+            font_size=10,
+            max_rows=10,
+        )
+        self.theme_combo.pack(fill="x")
+        preview_row = tk.Frame(appearance, bg=COLORS["card"])
+        preview_row.pack(fill="x", padx=20, pady=(0, 8))
+        for role in ("bg", "card", "accent", "text", "up", "down"):
+            swatch = tk.Frame(
+                preview_row,
+                bg=COLORS[role],
+                height=12,
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+            )
+            swatch.pack(side="left", expand=True, fill="x", padx=(0, 4))
+            swatch.pack_propagate(False)
+            self.theme_preview[role] = swatch
+        tk.Label(
+            appearance,
+            text="柔和底色 · 克制饱和度 · 正文与关键控件保持清晰对比",
+            bg=COLORS["card"],
+            fg=COLORS["muted"],
+            font=(FONT, 8),
+        ).pack(anchor="w", padx=20, pady=(0, 18))
 
         timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 0, 1)
         self.timezone_combo = SearchSelect(timezone_card, self.timezone_var, values=self.timezone_values, command=self._set_timezone, width=34, font_size=10, max_rows=8)
@@ -3700,12 +3626,19 @@ class SettingsPage(tk.Frame):
         self._commit_api_port()
 
     def _set_theme(self, theme: str) -> None:
-        self.theme_var.set(theme)
-        self.theme_callback(theme)
-        for value, button in self.theme_buttons.items():
-            selected = value == theme
-            label = THEME_LABELS[value]
-            button.configure(text=("●  " if selected else "○  ") + label, bg=COLORS["card"], fg=COLORS["accent"] if selected else COLORS["muted"], activebackground=COLORS["accent_dark"] if selected else COLORS["card_alt"], activeforeground=COLORS["accent"] if selected else COLORS["muted"], font=(FONT, 10, "bold" if selected else "normal"))
+        selected = self.theme_display_to_name.get(str(theme), str(theme))
+        if selected not in THEMES:
+            return
+        self.theme_var.set(self.theme_name_to_display[selected])
+        self.theme_callback(selected)
+        self._update_theme_preview()
+
+    def _update_theme_preview(self) -> None:
+        for role, swatch in self.theme_preview.items():
+            try:
+                swatch.configure(bg=COLORS[role], highlightbackground=COLORS["line"])
+            except tk.TclError:
+                return
 
     def _timezone_displays(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(ZoneInfo("UTC"))
@@ -4928,6 +4861,7 @@ class YaohengApp:
             return None
         keysym = str(getattr(event, "keysym", ""))
         by_keysym = {
+            **{f"KP_{digit}": digit for digit in "0123456789"},
             "KP_Add": "+", "KP_Subtract": "−", "KP_Multiply": "×", "KP_Divide": "÷",
             "KP_Decimal": ".", "KP_Separator": ".", "Return": "=", "KP_Enter": "=",
             "BackSpace": "←", "Delete": "AC", "Escape": "AC",

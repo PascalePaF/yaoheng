@@ -250,10 +250,13 @@ class V320TkTests(unittest.TestCase):
                 self.assertEqual(market_page.state.amount, "5")
                 self.assertTrue(all(market_page.amount_vars[slot].get() != "—" for slot in market_page.state.quote_slots))
 
-                for theme in ("ocean", "forest", "plum", "light", "dark"):
+                initial_theme = app.settings.theme
+                theme_order = [name for name in THEMES if name != initial_theme] + [initial_theme]
+                for theme in theme_order:
                     app.set_theme(theme)
                     self.assertEqual(dict(COLORS), THEMES[theme])
                     self.assertLess(app.last_theme_switch_ms, 100)
+                app.root.update_idletasks()
             finally:
                 if app is not None and not app.exiting:
                     app.force_exit()

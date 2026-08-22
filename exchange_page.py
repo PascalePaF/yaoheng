@@ -924,6 +924,10 @@ class ExchangePage(tk.Frame):
         self.card_frame: tk.Frame | None = None
         self.card_widgets: dict[int, tk.Frame] = {}
         self.currency_selectors: dict[int, tk.Widget] = {}
+        self.card_role_labels: dict[int, tk.Label] = {}
+        self.card_status_labels: dict[int, tk.Label] = {}
+        self.card_detail_labels: dict[int, tk.Label] = {}
+        self.card_swap_buttons: dict[int, tk.Button] = {}
         self.primary_entry: tk.Entry | None = None
         self.settlement_values: tuple[str, ...] = (state.settlement_fiat,)
         self.payment_by_label: dict[str, str] = {PAYMENT_ALL_LABEL: ""}
@@ -1066,6 +1070,10 @@ class ExchangePage(tk.Frame):
         self.card_widgets.clear()
         self.currency_selectors.clear()
         self.amount_entries.clear()
+        self.card_role_labels.clear()
+        self.card_status_labels.clear()
+        self.card_detail_labels.clear()
+        self.card_swap_buttons.clear()
         self.primary_entry = None
         for column in range(3):
             self.card_frame.grid_columnconfigure(column, weight=1, uniform="exchange_cards")
@@ -1087,20 +1095,98 @@ class ExchangePage(tk.Frame):
     def _refresh_target_cards(self, slots: Sequence[int] | None = None) -> None:
         if self.card_frame is None or self.closed:
             return
-        selected = tuple(slots) if slots is not None else self.state.quote_slots
-        for slot in selected:
-            if not 0 <= int(slot) < 7:
+        selected = set(slots if slots is not None else self.state.quote_slots)
+        # The active input is excluded from quote_slots, but its role styling
+        # still needs to change when the user starts typing in another card.
+        selected.add(int(self.state.active_slot))
+        for raw_slot in selected:
+            try:
+                slot = int(raw_slot)
+            except (TypeError, ValueError):
                 continue
-            if slot == self.state.primary_slot:
-                self._render_cards()
-                return
-            old = self.card_widgets.get(slot)
-            if old is not None:
-                old.destroy()
-            index = self.state.target_slots.index(slot)
-            card = self._make_card(self.card_frame, slot, primary=False)
-            card.grid(row=1 + index // 3, column=index % 3, sticky="nsew", padx=7, pady=7)
-            self.card_widgets[slot] = card
+            if 0 <= slot < 7:
+                self._update_card(slot)
+
+    def _refresh_currency_selectors(self) -> None:
+        displays = [self.code_to_display.get(code, code) for code in self.currency_values]
+        for slot, selector in self.currency_selectors.items():
+            display = self.code_to_display.get(
+                self.state.currencies[slot], self.state.currencies[slot]
+            )
+            set_values = getattr(selector, "set_values", None)
+            if callable(set_values):
+                set_values(displays)
+            else:
+                try:
+                    selector.configure(values=tuple(displays))
+                except (tk.TclError, TypeError):
+                    pass
+            setter = getattr(selector, "set", None)
+            if callable(setter):
+                try:
+                    setter(display)
+                except (tk.TclError, TypeError):
+                    pass
+
+    def _update_card(self, slot: int) -> None:
+        """Refresh text and styling without destroying the focused Entry."""
+
+        card = self.card_widgets.get(slot)
+        entry = self.amount_entries.get(slot)
+        role_label = self.card_role_labels.get(slot)
+        status_label = self.card_status_labels.get(slot)
+        detail_label = self.card_detail_labels.get(slot)
+        if any(item is None for item in (card, entry, role_label, status_label, detail_label)):
+            return
+        primary = slot == self.state.primary_slot
+        active = slot == self.state.active_slot
+        emphasis = primary or active
+        card.configure(
+            highlightthickness=2 if emphasis else 1,
+            highlightbackground=self.colors["accent"] if emphasis else self.colors["line"],
+        )
+        entry.configure(
+            highlightbackground=self.colors["accent"] if active else self.colors["line"],
+        )
+        role_label.configure(
+            text=(
+                "主货币" if primary else f"货币 {self.state.target_slots.index(slot) + 1}"
+            ) + (" · 当前输入" if active else ""),
+            bg=self.colors["accent"] if emphasis else self.colors["card_alt"],
+            fg=self.colors["on_accent"] if emphasis else self.colors["muted"],
+        )
+        result = None if active else self.state.current_result(slot)
+        status = "当前输入 · 同步换算其他六项" if active else (
+            result.status if result is not None else "等待换算"
+        )
+        details = (
+            "支持 +  −  ×  ÷  % 和括号；按 Enter 或点击别处计算。"
+            if active else "\n".join(result.details[:3]) if result is not None else ""
+        )
+        state_kind = "live" if active else result.state if result is not None else "muted"
+        status_color = {
+            "live": self.colors["up"],
+            "cache": self.colors["accent"],
+            "degraded": self.colors["down"],
+            "range": self.colors["down"],
+            "unconfigured": self.colors["down"],
+            "error": self.colors["down"],
+            "loading": self.colors["accent"],
+        }.get(state_kind, self.colors["muted"])
+        status_label.configure(text=status, fg=status_color)
+        detail_label.configure(
+            text=details or (
+                "最低展示价与本金额匹配价分开展示；不保证成交。"
+                if self.state.mode == "c2c" else
+                "公开行情仅供换算参考，不代表可直接成交。"
+            )
+        )
+        swap_button = self.card_swap_buttons.get(slot)
+        if swap_button is not None:
+            swap_button.configure(
+                state="normal" if self.state.can_swap(slot) else "disabled",
+                cursor="hand2" if self.state.can_swap(slot) else "arrow",
+            )
 
     def _make_card(self, parent: tk.Misc, slot: int, *, primary: bool) -> tk.Frame:
         active = slot == self.state.active_slot
@@ -1114,13 +1200,15 @@ class ExchangePage(tk.Frame):
         top = tk.Frame(card, bg=self.colors["card"])
         top.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 6))
         top.grid_columnconfigure(1, weight=1)
-        tk.Label(
+        role_label = tk.Label(
             top,
             text=("主货币" if primary else f"货币 {self.state.target_slots.index(slot) + 1}") + (" · 当前输入" if active else ""),
             bg=self.colors["accent"] if primary or active else self.colors["card_alt"],
             fg=self.colors["on_accent"] if primary or active else self.colors["muted"],
             font=(self.font_name, 8, "bold"), padx=8, pady=4,
-        ).grid(row=0, column=0, sticky="w")
+        )
+        role_label.grid(row=0, column=0, sticky="w")
+        self.card_role_labels[slot] = role_label
         currency_var = tk.StringVar(value=self.code_to_display.get(self.state.currencies[slot], self.state.currencies[slot]))
         currency_displays = [self.code_to_display.get(code, code) for code in self.currency_values]
         if self.currency_selector_factory is not None:
@@ -1180,11 +1268,13 @@ class ExchangePage(tk.Frame):
             "error": self.colors["down"],
             "loading": self.colors["accent"],
         }.get(state_kind, self.colors["muted"])
-        tk.Label(
+        status_label = tk.Label(
             card, text=status, bg=self.colors["card"], fg=status_color,
             font=(self.font_name, 8, "bold"), anchor="w", justify="left", wraplength=275,
-        ).grid(row=2, column=0, sticky="ew", padx=14)
-        tk.Label(
+        )
+        status_label.grid(row=2, column=0, sticky="ew", padx=14)
+        self.card_status_labels[slot] = status_label
+        detail_label = tk.Label(
             card,
             text=details or (
                 "最低展示价与本金额匹配价分开展示；不保证成交。"
@@ -1193,7 +1283,9 @@ class ExchangePage(tk.Frame):
             ),
             bg=self.colors["card"], fg=self.colors["muted"], font=(self.font_name, 7),
             anchor="w", justify="left", wraplength=275,
-        ).grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 7))
+        )
+        detail_label.grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 7))
+        self.card_detail_labels[slot] = detail_label
         if primary:
             return card
         actions = tk.Frame(card, bg=self.colors["card"])
@@ -1204,6 +1296,7 @@ class ExchangePage(tk.Frame):
         set_button.grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=4)
         swap_button = self._button(actions, "设为主币并换算", lambda selected=slot: self._swap_primary(selected), size=8)
         swap_button.grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=4)
+        self.card_swap_buttons[slot] = swap_button
         if not self.state.can_swap(slot):
             swap_button.configure(state="disabled", cursor="arrow")
         return card
@@ -1251,7 +1344,8 @@ class ExchangePage(tk.Frame):
         self._clear_result_amounts()
         self.payment_generation += 1
         self._refresh_payment_options()
-        self._render_cards()
+        self._refresh_currency_selectors()
+        self._refresh_target_cards()
         if self.visible:
             self.recalculate_now()
 
@@ -1504,7 +1598,8 @@ class ExchangePage(tk.Frame):
     def _finish_currency_change(self) -> None:
         if self.closed:
             return
-        self._render_cards()
+        self._refresh_currency_selectors()
+        self._refresh_target_cards()
         self._schedule_recalculate()
 
     def _set_primary(self, slot: int) -> None:
@@ -1560,7 +1655,7 @@ class ExchangePage(tk.Frame):
             self._clear_result_amounts()
             self._refresh_payment_options()
             self._save_state()
-            self._render_cards()
+            self._refresh_target_cards()
             self._schedule_recalculate()
 
     def _settlement_changed(self, _event: tk.Event | None = None) -> None:
@@ -1575,7 +1670,7 @@ class ExchangePage(tk.Frame):
             self._clear_result_amounts()
             self._refresh_payment_options()
             self._save_state()
-            self._render_cards()
+            self._refresh_target_cards()
             self._schedule_recalculate()
 
     def _payment_changed(self, _event: tk.Event | None = None) -> None:
@@ -1583,7 +1678,7 @@ class ExchangePage(tk.Frame):
         if self.state.set_payment_method(payment):
             self._clear_result_amounts()
             self._save_state()
-            self._render_cards()
+            self._refresh_target_cards()
             self._schedule_recalculate()
 
     def _refresh_payment_options(self) -> None:

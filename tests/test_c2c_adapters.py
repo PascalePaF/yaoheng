@@ -181,6 +181,40 @@ class BinanceAdapterTests(unittest.TestCase):
         with self.assertRaises(ProviderProtocolError):
             parse_binance_ads(payload, QuoteRequest("CNY", "USDT", "BUY", "100"))
 
+    def test_current_public_ad_list_schema_is_accepted(self):
+        """The live public Skill API uses *TransAmount/tradableAmount names."""
+
+        payload = {
+            "code": "000000",
+            "success": True,
+            "data": [{
+                "adNo": "current-schema-a",
+                "price": "6.68",
+                "fiat": "CNY",
+                "fiatScale": 2,
+                "asset": "USDT",
+                "assetScale": 2,
+                "minTransAmount": "100",
+                "maxTransAmount": "50000",
+                "tradableAmount": "1000.00",
+                "tradeMethods": [{"identifier": "BANK", "tradeMethodName": "银行卡"}],
+                "advertiser": {
+                    "monthFinishRate": "0.995",
+                    "monthOrderCount": 123,
+                },
+            }],
+        }
+
+        ads = parse_binance_ads(payload, QuoteRequest("CNY", "USDT", "BUY", "1000"))
+
+        self.assertEqual(len(ads), 1)
+        self.assertEqual(ads[0].ad_id, "current-schema-a")
+        self.assertEqual(ads[0].min_fiat, "100")
+        self.assertEqual(ads[0].max_fiat, "50000")
+        self.assertEqual(ads[0].available_asset, "1000")
+        self.assertEqual(ads[0].effective_max_fiat, "6680")
+        self.assertEqual(ads[0].completion_rate, "99.5")
+
 
 class OkxAdapterTests(unittest.TestCase):
     @staticmethod

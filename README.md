@@ -17,7 +17,7 @@
 
 ## 简介
 
-曜衡 3.20 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持从官方 GitHub Release 检查和覆盖升级。
+曜衡 3.20.1 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持从官方 GitHub Release 检查和覆盖升级。
 
 应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-3.20-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
-| 绿色免安装版 | `Yaoheng-3.20-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| Windows 安装版（推荐） | `Yaoheng-3.20.1-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-3.20.1-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
 | 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
 系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
@@ -36,8 +36,8 @@
 > 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.1-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.1-Windows-x64-Portable.zip"
 ```
 
 ## 功能
@@ -52,7 +52,7 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20-Windows-x64-Portable.zip"
 | 行情趋势 | 法币/虚拟币整表、计价币、参考数额、搜索排序及 1/7/30/90 日趋势 |
 | 本机 API | 默认关闭，仅 `127.0.0.1`；计算、换算、命令和能力查询，为未来机器人接入预留 |
 | 软件更新 | 在设置页检查官方 GitHub Release，校验附件大小和 SHA-256 后启动覆盖升级 |
-| 外观主题 | 深夜橙、明亮橙、深海蓝、森林绿、暮色紫五套主题即时切换，保持相同布局和字号 |
+| 外观主题 | 28 套低刺激深浅主题即时切换，避免纯黑/纯白大面积背景，保持相同布局和字号 |
 | 可靠性 | 十进制精确换算、响应校验、并发合并、原子缓存/设置、备份恢复和旧结果隔离 |
 
 ## 七币种兑换
@@ -74,7 +74,8 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20-Windows-x64-Portable.zip"
 - Binance：只使用官方 P2P Skill 的公共只读报价、广告列表和支付方式接口；不含账户、下单、订单或商家管理能力。
 - OKX：仅提供官方白名单/商家 P2P 的可配置只读框架。默认未配置、不会进入自动报价；需要集成方取得官方授权、字段契约和瞬时凭据。
 - 支付方式来自平台返回的官方 identifier，不硬编码网页内部标识。
-- “最低展示价”和“当前金额可匹配价”分开显示；V3.20 的 C2C 兑换页不再启用普通行情回退。
+- “最低展示价”和“当前金额可匹配价”分开显示；C2C 兑换页不启用普通行情回退。
+- Binance 广告解析同时兼容官方当前与旧版字段；金额、库存、完成率均从原始十进制值进入匹配逻辑。
 - KYC、地区、账户年龄、付款资格、广告方条件和实际库存仍由平台决定，曜衡不保证成交。
 
 应用不使用网页内部或逆向接口，也没有任何 C2C 写入/交易接口。
@@ -151,8 +152,8 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
 - `release\曜衡\曜衡.exe`
-- `release\Yaoheng-3.20-Windows-x64-Portable.zip`
-- `release\Yaoheng-3.20-Windows-x64-Setup.exe`
+- `release\Yaoheng-3.20.1-Windows-x64-Portable.zip`
+- `release\Yaoheng-3.20.1-Windows-x64-Setup.exe`
 - `release\SHA256SUMS.txt`
 
 ## 项目结构
