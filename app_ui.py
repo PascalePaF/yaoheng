@@ -834,6 +834,7 @@ class ThemePalettePicker(tk.Frame):
             str,
             tuple[tk.Frame, tk.Canvas, tk.Label, tk.Label, tk.Label],
         ] = {}
+        self._rows_theme_dirty = True
 
         self.header = tk.Frame(
             self,
@@ -940,6 +941,7 @@ class ThemePalettePicker(tk.Frame):
             source.grid(row=1, column=1, sticky="new", pady=(0, 6))
             marker = tk.Label(
                 row,
+                text="当前" if name == self.theme else "",
                 bg=COLORS["card_alt"],
                 fg=COLORS["accent"],
                 font=(FONT, 8, "bold"),
@@ -977,6 +979,7 @@ class ThemePalettePicker(tk.Frame):
         self.expanded = not self.expanded
         if self.expanded:
             self.gallery.pack(fill="x", padx=10, pady=(10, 3))
+            self._apply_row_theme()
         else:
             self.gallery.pack_forget()
         self._update_header()
@@ -1026,19 +1029,11 @@ class ThemePalettePicker(tk.Frame):
             source.configure(text=self._source_text(name))
         self._update_header()
 
-    def apply_theme(self) -> None:
-        self.configure(bg=COLORS["card"], highlightbackground=COLORS["line"])
-        self.header.configure(bg=COLORS["card_alt"])
-        self.header_swatch.configure(bg=COLORS["card_alt"])
-        self.header_name.configure(bg=COLORS["card_alt"], fg=COLORS["text"])
-        self.header_source.configure(bg=COLORS["card_alt"], fg=COLORS["muted"])
-        self.toggle_button.configure(
-            bg=COLORS["card_alt"],
-            fg=COLORS["accent"],
-            activebackground=COLORS["accent_dark"],
-            activeforeground=COLORS["accent"],
-        )
-        self.gallery.configure(bg=COLORS["card"])
+    def _apply_row_theme(self) -> None:
+        """Refresh the expanded gallery; hidden rows are updated lazily."""
+
+        if not self._rows_theme_dirty and all(swatch.find_all() for _, swatch, *_ in self.rows.values()):
+            return
         for name, (row, swatch, label, source, marker) in self.rows.items():
             selected = name == self.theme
             background = COLORS["selection"] if selected else COLORS["card_alt"]
@@ -1053,7 +1048,28 @@ class ThemePalettePicker(tk.Frame):
                 bg=background,
                 fg=COLORS["selection_text"] if selected else COLORS["accent"],
             )
-            self._draw_swatch(swatch, THEMES[name])
+            # Palette segments describe the candidate theme itself and never
+            # change when the active theme changes, so draw each only once.
+            if not swatch.find_all():
+                self._draw_swatch(swatch, THEMES[name])
+        self._rows_theme_dirty = False
+
+    def apply_theme(self) -> None:
+        self.configure(bg=COLORS["card"], highlightbackground=COLORS["line"])
+        self.header.configure(bg=COLORS["card_alt"])
+        self.header_swatch.configure(bg=COLORS["card_alt"])
+        self.header_name.configure(bg=COLORS["card_alt"], fg=COLORS["text"])
+        self.header_source.configure(bg=COLORS["card_alt"], fg=COLORS["muted"])
+        self.toggle_button.configure(
+            bg=COLORS["card_alt"],
+            fg=COLORS["accent"],
+            activebackground=COLORS["accent_dark"],
+            activeforeground=COLORS["accent"],
+        )
+        self.gallery.configure(bg=COLORS["card"])
+        self._rows_theme_dirty = True
+        if self.expanded:
+            self._apply_row_theme()
         self._update_header()
 
 
@@ -1446,7 +1462,7 @@ class CalculatorPage(tk.Frame):
             self.after_jobs.schedule(0, self._evaluate_manual_expression, idle=True)
             return "break"
         if normalized and normalized != raw_char:
-            self.expression_entry.insert(tk.INSERT, normalized)
+            self._insert_expression_token(normalized)
             return "break"
         if not raw_char:
             keysym = str(getattr(event, "keysym", ""))
@@ -1461,9 +1477,29 @@ class CalculatorPage(tk.Frame):
             }
             token = keypad.get(keysym)
             if token is not None:
-                self.expression_entry.insert(tk.INSERT, token)
+                self._insert_expression_token(token)
                 return "break"
         return None
+
+    def _insert_expression_token(self, token: str) -> None:
+        """Insert normalized keyboard text without relying on a mapped Tk window."""
+
+        current = self.expression_var.get()
+        try:
+            start = int(self.expression_entry.index(tk.SEL_FIRST))
+            end = int(self.expression_entry.index(tk.SEL_LAST))
+        except tk.TclError:
+            try:
+                start = end = int(self.expression_entry.index(tk.INSERT))
+            except tk.TclError:
+                start = end = len(current)
+        start = max(0, min(start, len(current)))
+        end = max(start, min(end, len(current)))
+        self.expression_var.set(current[:start] + token + current[end:])
+        try:
+            self.expression_entry.icursor(start + len(token))
+        except tk.TclError:
+            pass
 
     def _manual_expression_changed(self, *_args) -> None:
         if self._updating_expression:
@@ -5351,10 +5387,13 @@ class YaohengApp:
         def recolor(widget: tk.Misc) -> None:
             if isinstance(widget, SearchSelect):
                 themed_selects.append(widget)
+                return
             if isinstance(widget, ThemePalettePicker):
                 themed_palette_pickers.append(widget)
+                return
             if isinstance(widget, CalculatorKey):
                 themed_calculator_keys.append(widget)
+                return
             changes: dict[str, str] = {}
             widget_type = type(widget)
             options = supported_options.get(widget_type)

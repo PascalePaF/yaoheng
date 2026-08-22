@@ -616,11 +616,12 @@ def format_datetime(value: datetime, language: str | None = None) -> str:
     selected = normalize_language(language or _language)
     if selected == "en_US":
         return value.strftime("%Y-%m-%d %H:%M:%S")
-    if selected == "ja_JP":
-        return value.strftime("%Y年%m月%d日 %H:%M:%S")
-    if selected == "zh_TW":
-        return value.strftime("%Y年%m月%d日 %H:%M:%S")
-    return value.strftime("%Y年%m月%d日 %H:%M:%S")
+    # Keep non-ASCII characters out of strftime's format string.  Python 3.11
+    # on an English Windows locale otherwise asks the locale codec to encode
+    # 年/月/日 and can raise UnicodeEncodeError while the settings page opens.
+    date_digits = value.strftime("%Y|%m|%d|%H:%M:%S").split("|")
+    year, month, day, clock = date_digits
+    return f"{year}年{month}月{day}日 {clock}"
 
 
 _ASSET_NAMES_EN: Mapping[str, str] = {

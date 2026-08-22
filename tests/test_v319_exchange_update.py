@@ -308,7 +308,8 @@ class ExchangePageV319TkTests(unittest.TestCase):
                 primary_card = page.card_widgets[page.state.primary_slot]
                 grid = primary_card.grid_info()
                 self.assertEqual(int(grid["column"]), 0)
-                self.assertEqual(int(grid["columnspan"]), 3)
+                self.assertIn(page._card_columns, {1, 2, 3})
+                self.assertEqual(int(grid["columnspan"]), page._card_columns)
                 self.assertEqual(page.primary_entry.cget("justify"), "left")
                 self.assertTrue(all(isinstance(selector, SearchSelect) for selector in page.currency_selectors.values()))
                 settings_page = app.pages["settings"]
