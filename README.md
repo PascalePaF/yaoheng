@@ -17,7 +17,7 @@
 
 ## 简介
 
-曜衡 3.20.2 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持容错检查官方 GitHub Release 和覆盖升级。
+曜衡 3.21.0 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持容错检查官方 GitHub Release 和覆盖升级。
 
 应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-3.20.2-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
-| 绿色免安装版 | `Yaoheng-3.20.2-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| Windows 安装版（推荐） | `Yaoheng-3.21.0-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-3.21.0-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
 | 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
 系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
@@ -36,8 +36,8 @@
 > 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.2-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.2-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.0-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.0-Windows-x64-Portable.zip"
 ```
 
 ## 功能
@@ -52,8 +52,22 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.2-Windows-x64-Portable.zip"
 | 行情趋势 | 法币/虚拟币整表、计价币、参考数额、搜索排序及 1/7/30/90 日趋势 |
 | 本机 API | 默认关闭，仅 `127.0.0.1`；计算、换算、命令和能力查询，为未来机器人接入预留 |
 | 软件更新 | 有限重试官方 GitHub Release 请求，校验附件大小和 SHA-256 后启动覆盖升级；代理错误信息自动脱敏 |
-| 外观主题 | 28 套低饱和深色主题即时切换，分层表面避免纯黑背景，保持相同布局和字号 |
+| 外观主题 | 28 套有来源的深色适配主题；可收展色块画廊与顺序切换按钮，即时换色且保持相同布局和字号 |
 | 可靠性 | Windows 单实例与重复启动唤醒、可选关闭行为、十进制换算、响应校验、原子缓存/设置和旧结果隔离 |
+
+## 主题与配色
+
+设置页的外观区域默认收回，只显示当前主题的五段矩形色块和名称；展开后，每一套主题都单独显示“背景、卡片、强调色、上涨色、下跌色”预览，点击即可即时切换。设置页最下方另有“切换下一个主题”按钮，可按画廊顺序逐套比较。旧版本保存的主题内部标识保持不变，覆盖升级不会重置选择。
+
+V3.21.0 的配色以长期使用的深色层次为前提，参考以下公开调色板，并针对曜衡的窗口、表格和金融涨跌色降低大面积亮度与强调色刺激度；它们是曜衡适配方案，不是各项目的官方移植版：
+
+- [Catppuccin Palette](https://catppuccin.com/palette/)
+- [Nord](https://www.nordtheme.com/)
+- [Everforest Palette](https://github.com/sainnhe/everforest/blob/master/palette.md)
+- [Rosé Pine Palette](https://rosepinetheme.com/palette/)
+- [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme)
+- [Gruvbox](https://github.com/morhetz/gruvbox)
+- [Solarized](https://ethanschoonover.com/solarized/)
 
 ## 七币种兑换
 
@@ -156,14 +170,14 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
 - `release\曜衡\曜衡.exe`
-- `release\Yaoheng-3.20.2-Windows-x64-Portable.zip`
-- `release\Yaoheng-3.20.2-Windows-x64-Setup.exe`
+- `release\Yaoheng-3.21.0-Windows-x64-Portable.zip`
+- `release\Yaoheng-3.21.0-Windows-x64-Setup.exe`
 - `release\SHA256SUMS.txt`
 
 发布前可在随机系统临时目录复验覆盖升级、用户数据保留和打包后单实例；测试使用独立安装身份，不会改动真实曜衡安装：
 
 ```powershell
-.\tools\smoke_upgrade.ps1 -PreviousVersion 3.20.1
+.\tools\smoke_upgrade.ps1 -PreviousVersion 3.20.2
 ```
 
 ## 项目结构

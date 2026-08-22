@@ -110,71 +110,102 @@ def _palette(
 
 
 _SPECS: Mapping[str, Mapping[str, str]] = {
-    # Legacy keys remain stable so saved settings migrate without resetting.  All
-    # visual variants are now layered, low-saturation dark palettes.
-    "dark": dict(bg="#121518", sidebar="#181C20", card="#20252A", card_alt="#282E34", key="#30373E", key_hover="#39424A", accent="#A3A9AE", text="#E7E9EA", muted="#A6ADB2", line="#3D454D", up="#8FA892", down="#B98E8E"),
-    "light": dict(bg="#171719", sidebar="#1E1E21", card="#26272B", card_alt="#2E3035", key="#363940", key_hover="#40444C", accent="#B0A495", text="#E9E7E3", muted="#ADA9A2", line="#45474E", up="#91A591", down="#B7908A"),
-    "ocean": dict(bg="#11191E", sidebar="#182228", card="#202C33", card_alt="#283740", key="#31414A", key_hover="#3A4C56", accent="#94ABB5", text="#E5EAEC", muted="#A2B0B6", line="#40515A", up="#89A69B", down="#B68C8E"),
-    "forest": dict(bg="#121A16", sidebar="#19231D", card="#212D26", card_alt="#29372F", key="#314138", key_hover="#3A4B41", accent="#A1AE98", text="#E5E9E5", muted="#A5AFA7", line="#415149", up="#8EA895", down="#B58D89"),
-    "plum": dict(bg="#19151B", sidebar="#211C24", card="#2A242D", card_alt="#342D38", key="#3E3643", key_hover="#49404F", accent="#AA9BAD", text="#EAE6EA", muted="#AFA7B0", line="#4D4352", up="#91A397", down="#B78F99"),
-    "solarized_dark": dict(bg="#10191B", sidebar="#172225", card="#1F2C2F", card_alt="#27373A", key="#304145", key_hover="#394C50", accent="#A8A78E", text="#E8E8E1", muted="#A7AEAA", line="#405155", up="#93A58B", down="#B68D86"),
-    "solarized_light": dict(bg="#1A1713", sidebar="#221E19", card="#2B261F", card_alt="#352F27", key="#40392F", key_hover="#4B4439", accent="#B0A087", text="#EBE7DF", muted="#B0A89C", line="#51493E", up="#98A28A", down="#B7908B"),
-    "nord": dict(bg="#141820", sidebar="#1B202A", card="#232A36", card_alt="#2B3442", key="#343E4E", key_hover="#3D495B", accent="#98A9BC", text="#E7EAF0", muted="#A7AFBB", line="#455165", up="#91A7A4", down="#B88D95"),
-    "nord_light": dict(bg="#171C23", sidebar="#1E252E", card="#262F3A", card_alt="#2F3946", key="#384452", key_hover="#424F5F", accent="#9FADBA", text="#E8EBED", muted="#AAB2B8", line="#495562", up="#91A69E", down="#B78F92"),
-    "gruvbox_dark": dict(bg="#191816", sidebar="#211F1C", card="#2A2723", card_alt="#342F2A", key="#3E3932", key_hover="#49433A", accent="#B0A087", text="#EAE6DC", muted="#AEA79A", line="#504A41", up="#98A48B", down="#B7908B"),
-    "gruvbox_light": dict(bg="#1C1814", sidebar="#241F1A", card="#2D2721", card_alt="#372F28", key="#423931", key_hover="#4D443A", accent="#B39F84", text="#ECE7DE", muted="#B1A89B", line="#534A40", up="#99A38A", down="#B8918C"),
-    "everforest_dark": dict(bg="#141A17", sidebar="#1B231F", card="#232D28", card_alt="#2C3831", key="#35423A", key_hover="#3F4D44", accent="#A4AC91", text="#E7E9E3", muted="#A8AEA4", line="#465149", up="#91A58F", down="#B58F8A"),
-    "everforest_light": dict(bg="#171B16", sidebar="#1E241D", card="#272E25", card_alt="#30392E", key="#3A4437", key_hover="#454F41", accent="#A8AD92", text="#E9EAE4", muted="#AAAEA4", line="#495247", up="#94A691", down="#B6908B"),
-    "catppuccin_mocha": dict(bg="#181720", sidebar="#201F29", card="#292833", card_alt="#33313E", key="#3D3B49", key_hover="#484655", accent="#AAA0B8", text="#E9E7EC", muted="#ACA8B4", line="#4D4A59", up="#91A397", down="#B78E99"),
-    "catppuccin_latte": dict(bg="#1B181D", sidebar="#231F25", card="#2C272F", card_alt="#362F39", key="#413945", key_hover="#4C4351", accent="#B0A0AC", text="#EBE7EA", muted="#AFA8AD", line="#514850", up="#93A395", down="#B99096"),
-    "rose_pine": dict(bg="#19161B", sidebar="#211D23", card="#2A252D", card_alt="#342E38", key="#3E3743", key_hover="#49414F", accent="#B09EA9", text="#EBE6E9", muted="#AFA6AC", line="#4E4552", up="#90A294", down="#BA8E97"),
-    "rose_pine_dawn": dict(bg="#1C1719", sidebar="#241E21", card="#2D272A", card_alt="#382F33", key="#42393D", key_hover="#4D4348", accent="#B3A0A2", text="#ECE7E7", muted="#B1A8A8", line="#53484B", up="#96A397", down="#BB9093"),
-    "tokyo_night": dict(bg="#131720", sidebar="#1A202A", card="#222A36", card_alt="#2B3442", key="#343F4E", key_hover="#3E4A5B", accent="#99A8BD", text="#E6E9EF", muted="#A5AEBB", line="#455165", up="#8FA59B", down="#B78C96"),
-    "tokyo_day": dict(bg="#161A21", sidebar="#1D232C", card="#252D38", card_alt="#2E3744", key="#374250", key_hover="#414D5D", accent="#9DAABC", text="#E8EAEF", muted="#A8AFBA", line="#485462", up="#91A59B", down="#B88E95"),
-    "github_dark": dict(bg="#13171B", sidebar="#1A1F24", card="#22282E", card_alt="#2B3239", key="#343C45", key_hover="#3E4852", accent="#98A8B4", text="#E6E9EB", muted="#A4ABB1", line="#444E57", up="#8FA493", down="#B68C8E"),
-    "github_light": dict(bg="#181A1D", sidebar="#1F2226", card="#282C31", card_alt="#31363C", key="#3A4047", key_hover="#454B54", accent="#A4ACB3", text="#E9EAEA", muted="#AAADB1", line="#4A5058", up="#94A594", down="#B89090"),
-    "one_dark": dict(bg="#15171B", sidebar="#1C2025", card="#24292F", card_alt="#2D333A", key="#363D46", key_hover="#404852", accent="#9DA8B4", text="#E7E9EB", muted="#A6ABB2", line="#464E58", up="#91A493", down="#B78D90"),
-    "ayu_mirage": dict(bg="#171A1D", sidebar="#1E2226", card="#272C31", card_alt="#30363C", key="#3A4148", key_hover="#454C54", accent="#B0A18D", text="#EAE8E3", muted="#ADA9A2", line="#4A5158", up="#95A38F", down="#B9918A"),
-    "ayu_light": dict(bg="#1A1815", sidebar="#221F1B", card="#2B2722", card_alt="#352F29", key="#403A32", key_hover="#4B443B", accent="#B1A28C", text="#EBE8E1", muted="#AFA99F", line="#514A41", up="#98A38E", down="#B7908C"),
-    "zenburn": dict(bg="#181B17", sidebar="#20241F", card="#292E27", card_alt="#33382F", key="#3D4338", key_hover="#484F42", accent="#A8AA91", text="#E8E9E2", muted="#AAAEA3", line="#4D5348", up="#95A58F", down="#B6908B"),
-    "paper_sepia": dict(bg="#1B1814", sidebar="#231F1A", card="#2C2721", card_alt="#362F28", key="#413930", key_hover="#4C4339", accent="#B1A18B", text="#EBE7DE", muted="#B0A89B", line="#52493F", up="#98A28D", down="#B7908B"),
-    "slate": dict(bg="#15191D", sidebar="#1C2126", card="#242A30", card_alt="#2D343B", key="#363E46", key_hover="#404951", accent="#9EA9B0", text="#E7E9EA", muted="#A7ADB1", line="#464F57", up="#91A397", down="#B68F8F"),
-    "mist_blue": dict(bg="#141A1E", sidebar="#1B2227", card="#232C32", card_alt="#2C363D", key="#354149", key_hover="#3F4C55", accent="#9CAEB7", text="#E7EBEC", muted="#A6B0B4", line="#45525A", up="#90A69A", down="#B68D91"),
+    # Stable internal keys preserve existing saved settings.  The visible V3.21
+    # palettes are restrained dark adaptations of established community colour
+    # systems rather than twenty-eight almost-identical greys.
+    "dark": dict(bg="#1E1E2E", sidebar="#181825", card="#28283A", card_alt="#313244", key="#393A4D", key_hover="#45475A", accent="#AAA6D2", text="#CDD6F4", muted="#A6ADC8", line="#45475A", up="#9CCB9B", down="#D58B9F"),
+    "light": dict(bg="#24273A", sidebar="#1E2030", card="#2B2E44", card_alt="#363A52", key="#3E425B", key_hover="#494D64", accent="#8EAACF", text="#CAD3F5", muted="#A5ADCB", line="#494D64", up="#94C49C", down="#D28C9F"),
+    "catppuccin_mocha": dict(bg="#201C26", sidebar="#191720", card="#2B2532", card_alt="#362E3E", key="#403849", key_hover="#4B4255", accent="#D0A0B2", text="#E6DCEC", muted="#B7A9BF", line="#4B4255", up="#9FC49D", down="#D1899D"),
+    "catppuccin_latte": dict(bg="#303446", sidebar="#292C3C", card="#373B4D", card_alt="#414559", key="#4A4F65", key_hover="#555B73", accent="#8DB7CA", text="#C6D0F5", muted="#A5ADCE", line="#555B73", up="#99C09A", down="#D28C9D"),
+
+    "nord": dict(bg="#2E3440", sidebar="#272C36", card="#363D49", card_alt="#404957", key="#495463", key_hover="#566273", accent="#88B8C5", text="#D8DEE9", muted="#AAB3C2", line="#4C566A", up="#9AB89A", down="#C88991"),
+    "nord_light": dict(bg="#262D38", sidebar="#202630", card="#303845", card_alt="#3A4452", key="#44505E", key_hover="#4F5C6C", accent="#86B3AD", text="#D7DFE8", muted="#A8B3BC", line="#4C5968", up="#99B89D", down="#C98B92"),
+    "slate": dict(bg="#242832", sidebar="#1E222B", card="#2D333E", card_alt="#373E4B", key="#414A59", key_hover="#4D5869", accent="#A6A6C4", text="#DDE1E8", muted="#AFB5BF", line="#4B5565", up="#9DB69B", down="#C98A98"),
+    "mist_blue": dict(bg="#27323A", sidebar="#212A31", card="#303D45", card_alt="#3A4851", key="#45545E", key_hover="#50616C", accent="#91B6C0", text="#DBE2E6", muted="#AFBBC0", line="#4E5F69", up="#9BB8A0", down="#CA8D92"),
+
+    "forest": dict(bg="#2D353B", sidebar="#272F33", card="#343F44", card_alt="#3D484D", key="#465258", key_hover="#505C62", accent="#92B193", text="#D3C6AA", muted="#A7B0A1", line="#4F585E", up="#A7C080", down="#D18A89"),
+    "everforest_dark": dict(bg="#272E31", sidebar="#22282B", card="#30383C", card_alt="#394348", key="#424D52", key_hover="#4C585D", accent="#86B4A0", text="#D1C7B0", muted="#A5ACA2", line="#4C565A", up="#96B58C", down="#CD8888"),
+    "everforest_light": dict(bg="#303837", sidebar="#293130", card="#384240", card_alt="#424D4A", key="#4B5753", key_hover="#56625E", accent="#A6B28A", text="#D7CBB2", muted="#AFB3A3", line="#56615C", up="#A8BF87", down="#D28E86"),
+    "zenburn": dict(bg="#292E2A", sidebar="#232824", card="#323832", card_alt="#3C433C", key="#464E46", key_hover="#515A51", accent="#B0AD84", text="#D5D2BC", muted="#AAAFA0", line="#50594F", up="#A5B88C", down="#C78D88"),
+
+    "plum": dict(bg="#191724", sidebar="#14131E", card="#211F30", card_alt="#2A273D", key="#343047", key_hover="#403D52", accent="#B5A1CF", text="#E0DEF4", muted="#A49FB8", line="#403D52", up="#9DBE9E", down="#D18B9F"),
+    "rose_pine": dict(bg="#191724", sidebar="#15131F", card="#1F1D2E", card_alt="#29263A", key="#322E45", key_hover="#403D52", accent="#8FBBC4", text="#E0DEF4", muted="#A29DB6", line="#403D52", up="#9CBDA0", down="#D08B9B"),
+    "rose_pine_dawn": dict(bg="#232136", sidebar="#1D1B2B", card="#2A273F", card_alt="#353149", key="#3E3A52", key_hover="#4A4660", accent="#C0A5D8", text="#E0DEF4", muted="#A8A3BC", line="#4A4660", up="#A1BE9F", down="#D18D9F"),
+    "paper_sepia": dict(bg="#211C1B", sidebar="#1B1717", card="#2A2422", card_alt="#342D2A", key="#3E3732", key_hover="#4A433C", accent="#C8AA78", text="#E4DED4", muted="#AFA69B", line="#4A433C", up="#A5B891", down="#CE8B8A"),
+
+    "tokyo_night": dict(bg="#1A1B26", sidebar="#16161E", card="#24283B", card_alt="#2D3247", key="#363C52", key_hover="#414868", accent="#829DD2", text="#C0CAF5", muted="#9FA9CF", line="#414868", up="#96BC83", down="#D08192"),
+    "tokyo_day": dict(bg="#24283B", sidebar="#1F2335", card="#2B3045", card_alt="#343A51", key="#3D455C", key_hover="#48516A", accent="#85A7C7", text="#C0CAF5", muted="#9FAACD", line="#48516A", up="#97B887", down="#CE8392"),
+    "one_dark": dict(bg="#1C1D2A", sidebar="#171823", card="#252738", card_alt="#2E3145", key="#383C51", key_hover="#444960", accent="#A59BD0", text="#C7CFF2", muted="#A3AAC9", line="#444960", up="#9ABA8B", down="#D18496"),
+    "github_light": dict(bg="#182027", sidebar="#141A20", card="#212B34", card_alt="#2A3641", key="#33414D", key_hover="#3D4D5A", accent="#79B8C2", text="#C5D3E2", muted="#A1B0BF", line="#3D4D5A", up="#92B99A", down="#CF858F"),
+
+    "gruvbox_dark": dict(bg="#1D2021", sidebar="#191B1C", card="#282828", card_alt="#32302F", key="#3C3836", key_hover="#504945", accent="#83A598", text="#EBDBB2", muted="#BDAE93", line="#504945", up="#A5AD67", down="#C97970"),
+    "gruvbox_light": dict(bg="#242321", sidebar="#1E1D1B", card="#2E2B28", card_alt="#383430", key="#423D38", key_hover="#504945", accent="#C19D69", text="#E8D8B0", muted="#BBAE94", line="#504945", up="#A8AE6D", down="#C77B72"),
+    "ayu_mirage": dict(bg="#202426", sidebar="#1A1E20", card="#292E30", card_alt="#33393B", key="#3D4446", key_hover="#494F50", accent="#86A8A1", text="#DDD4B8", muted="#B0A995", line="#4C514F", up="#9EAE78", down="#C77D74"),
+    "ayu_light": dict(bg="#24201C", sidebar="#1E1B18", card="#2E2924", card_alt="#38322C", key="#433B34", key_hover="#50473E", accent="#C49A68", text="#E9D9B8", muted="#BAAC94", line="#51483F", up="#A7AD74", down="#C97D70"),
+
+    "ocean": dict(bg="#002B36", sidebar="#06252D", card="#073642", card_alt="#0E404A", key="#174A54", key_hover="#225661", accent="#5C9DB1", text="#C2CDCA", muted="#93A1A1", line="#2B5B63", up="#8FA67A", down="#C47775"),
+    "solarized_dark": dict(bg="#082A31", sidebar="#062229", card="#103740", card_alt="#18434B", key="#214D55", key_hover="#2B5961", accent="#6F9FC0", text="#C3CECA", muted="#98A8A5", line="#2F5C63", up="#92A879", down="#C47A72"),
+    "solarized_light": dict(bg="#242821", sidebar="#1E221C", card="#2D322A", card_alt="#373D33", key="#42493D", key_hover="#4D5748", accent="#B19A63", text="#DDD8BD", muted="#B1AD94", line="#505A4B", up="#9FAB72", down="#C27C70"),
+    "github_dark": dict(bg="#0E292B", sidebar="#0B2325", card="#163436", card_alt="#1E4042", key="#284A4C", key_hover="#325659", accent="#72A99F", text="#C8D2CB", muted="#9CAC9F", line="#365B5B", up="#91AC7A", down="#C27B73"),
 }
 
 
 THEMES = {name: _palette(**spec) for name, spec in _SPECS.items()}
 
 THEME_LABELS = {
-    "dark": "墨夜石墨",
-    "light": "月岩深灰",
-    "ocean": "深海雾蓝",
-    "forest": "松林墨绿",
-    "plum": "暮色灰紫",
-    "solarized_dark": "暗潮青灰",
-    "solarized_light": "旧铜夜色",
-    "nord": "北境深蓝",
-    "nord_light": "峡湾蓝灰",
-    "gruvbox_dark": "复古炭棕",
-    "gruvbox_light": "胡桃夜棕",
-    "everforest_dark": "常青墨色",
-    "everforest_light": "松针深绿",
-    "catppuccin_mocha": "摩卡夜紫",
-    "catppuccin_latte": "奶咖深灰",
-    "rose_pine": "玫瑰松夜",
-    "rose_pine_dawn": "烟玫深色",
-    "tokyo_night": "东京深夜",
-    "tokyo_day": "雨巷蓝灰",
-    "github_dark": "代码炭灰",
-    "github_light": "钛银深灰",
-    "one_dark": "一体夜灰",
-    "ayu_mirage": "蜃景暖夜",
-    "ayu_light": "砂岩夜色",
-    "zenburn": "禅意墨绿",
-    "paper_sepia": "墨纸深棕",
-    "slate": "深石板灰",
-    "mist_blue": "雾港深蓝",
+    "dark": "Catppuccin · 摩卡薰衣草",
+    "light": "Catppuccin · 玛奇朵蓝",
+    "catppuccin_mocha": "Catppuccin · 摩卡玫瑰",
+    "catppuccin_latte": "Catppuccin · 果冻蓝",
+    "nord": "Nord · 极光蓝",
+    "nord_light": "Nord · 冰川青",
+    "slate": "Nord · 极夜灰",
+    "mist_blue": "Nord · 霜雾蓝",
+    "forest": "Everforest · 森林",
+    "everforest_dark": "Everforest · 深林",
+    "everforest_light": "Everforest · 青苔",
+    "zenburn": "Everforest · 暖叶",
+    "plum": "Rosé Pine · 鸢尾",
+    "rose_pine": "Rosé Pine · 松雾",
+    "rose_pine_dawn": "Rosé Pine · 月夜",
+    "paper_sepia": "Rosé Pine · 金砂",
+    "tokyo_night": "Tokyo Night · 夜蓝",
+    "tokyo_day": "Tokyo Night · 风暴",
+    "one_dark": "Tokyo Night · 月紫",
+    "github_light": "Tokyo Night · 霓青",
+    "gruvbox_dark": "Gruvbox · 复古",
+    "gruvbox_light": "Gruvbox · 暖棕",
+    "ayu_mirage": "Gruvbox · 静蓝",
+    "ayu_light": "Gruvbox · 灰橙",
+    "ocean": "Solarized · 深海",
+    "solarized_dark": "Solarized · 青蓝",
+    "solarized_light": "Solarized · 暮金",
+    "github_dark": "Solarized · 青绿",
 }
+
+_SOURCE_CATALOG = {
+    "catppuccin": ("Catppuccin", "https://catppuccin.com/palette/"),
+    "nord": ("Nord", "https://www.nordtheme.com/"),
+    "everforest": ("Everforest", "https://github.com/sainnhe/everforest/blob/master/palette.md"),
+    "rose_pine": ("Rosé Pine", "https://rosepinetheme.com/palette/"),
+    "tokyo_night": ("Tokyo Night", "https://github.com/tokyo-night/tokyo-night-vscode-theme"),
+    "gruvbox": ("Gruvbox", "https://github.com/morhetz/gruvbox"),
+    "solarized": ("Solarized", "https://ethanschoonover.com/solarized/"),
+}
+
+_THEME_FAMILIES = {
+    **{name: "catppuccin" for name in ("dark", "light", "catppuccin_mocha", "catppuccin_latte")},
+    **{name: "nord" for name in ("nord", "nord_light", "slate", "mist_blue")},
+    **{name: "everforest" for name in ("forest", "everforest_dark", "everforest_light", "zenburn")},
+    **{name: "rose_pine" for name in ("plum", "rose_pine", "rose_pine_dawn", "paper_sepia")},
+    **{name: "tokyo_night" for name in ("tokyo_night", "tokyo_day", "one_dark", "github_light")},
+    **{name: "gruvbox" for name in ("gruvbox_dark", "gruvbox_light", "ayu_mirage", "ayu_light")},
+    **{name: "solarized" for name in ("ocean", "solarized_dark", "solarized_light", "github_dark")},
+}
+
+# Public provenance lets the Settings gallery and project documentation state
+# which published palette informed each adapted, application-specific theme.
+THEME_SOURCES = {name: _SOURCE_CATALOG[family] for name, family in _THEME_FAMILIES.items()}
 
 SUPPORTED_THEME_NAMES = frozenset(THEMES)
 
@@ -183,5 +214,6 @@ __all__ = [
     "SUPPORTED_THEME_NAMES",
     "THEMES",
     "THEME_LABELS",
+    "THEME_SOURCES",
     "contrast_ratio",
 ]

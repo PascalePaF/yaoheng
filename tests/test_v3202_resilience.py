@@ -334,15 +334,18 @@ class DarkThemePolicyTests(unittest.TestCase):
             with self.subTest(theme=name):
                 for role in ("bg", "sidebar", "card", "card_alt"):
                     channels = [int(palette[role][index:index + 2], 16) for index in (1, 3, 5)]
-                    self.assertLessEqual(max(channels), 0x48)
-                    self.assertLessEqual(max(channels) - min(channels), 28)
+                    # V3.21 permits recognisable blue/green/brown surfaces from
+                    # established palettes while keeping every large area dark.
+                    self.assertLessEqual(max(channels), 0x5A)
+                    self.assertLessEqual(max(channels) - min(channels), 60)
 
     def test_accents_and_market_colours_are_restrained(self):
         for name, palette in THEMES.items():
             with self.subTest(theme=name):
                 for role in ("accent", "up", "down"):
                     channels = [int(palette[role][index:index + 2], 16) for index in (1, 3, 5)]
-                    self.assertLessEqual(max(channels) - min(channels), 48)
+                    self.assertLessEqual(max(channels), 0xD8)
+                    self.assertLessEqual(max(channels) - min(channels), 96)
 
     def test_visible_names_no_longer_advertise_light_themes(self):
         self.assertEqual(set(THEMES), set(THEME_LABELS))

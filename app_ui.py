@@ -39,7 +39,7 @@ from local_api import LocalAPIError, LocalAPIPortInUseError, LocalAPIServer
 from rate_service import RateService, RateSnapshot, crypto_display_name, fiat_display_name, fiat_region, portable_dir, relative_rate_change
 from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
-from theme_catalog import THEME_LABELS, THEMES
+from theme_catalog import THEME_LABELS, THEME_SOURCES, THEMES
 from update_service import DownloadedUpdate, GitHubUpdateService, UpdateError, UpdateInfo
 
 
@@ -787,6 +787,243 @@ class SearchSelect(tk.Frame):
                     self.popup.destroy()
             except tk.TclError:
                 pass
+
+
+class ThemePalettePicker(tk.Frame):
+    """Collapsible, keyboard-accessible theme gallery with real palette swatches."""
+
+    SWATCH_ROLES = ("bg", "card", "accent", "up", "down")
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        theme: str,
+        command: Callable[[str], None],
+    ) -> None:
+        super().__init__(
+            master,
+            bg=COLORS["card"],
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=COLORS["line"],
+        )
+        self.theme = theme if theme in THEMES else next(iter(THEMES))
+        self.command = command
+        self.expanded = False
+        self.rows: dict[
+            str,
+            tuple[tk.Frame, tk.Canvas, tk.Label, tk.Label, tk.Label],
+        ] = {}
+
+        self.header = tk.Frame(
+            self,
+            bg=COLORS["card_alt"],
+            takefocus=True,
+            cursor="hand2",
+        )
+        self.header.pack(fill="x")
+        self.header.grid_columnconfigure(1, weight=1)
+        self.header_swatch = tk.Canvas(
+            self.header,
+            width=150,
+            height=30,
+            bg=COLORS["card_alt"],
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.header_swatch.grid(row=0, column=0, rowspan=2, sticky="w", padx=(12, 14), pady=10)
+        self.header_name = tk.Label(
+            self.header,
+            bg=COLORS["card_alt"],
+            fg=COLORS["text"],
+            font=(FONT, 10, "bold"),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.header_name.grid(row=0, column=1, sticky="sew", pady=(8, 0))
+        self.header_source = tk.Label(
+            self.header,
+            bg=COLORS["card_alt"],
+            fg=COLORS["muted"],
+            font=(FONT, 8),
+            anchor="w",
+            cursor="hand2",
+        )
+        self.header_source.grid(row=1, column=1, sticky="new", pady=(1, 8))
+        self.toggle_button = tk.Button(
+            self.header,
+            command=self.toggle,
+            bg=COLORS["card_alt"],
+            fg=COLORS["accent"],
+            activebackground=COLORS["accent_dark"],
+            activeforeground=COLORS["accent"],
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+            font=(FONT, 9, "bold"),
+            padx=12,
+        )
+        self.toggle_button.grid(row=0, column=2, rowspan=2, sticky="nse", padx=(8, 5), pady=6)
+
+        self.gallery = tk.Frame(self, bg=COLORS["card"])
+        self.gallery.grid_columnconfigure(0, weight=1, uniform="theme_gallery")
+        self.gallery.grid_columnconfigure(1, weight=1, uniform="theme_gallery")
+        for index, name in enumerate(THEMES):
+            row = tk.Frame(
+                self.gallery,
+                bg=COLORS["card_alt"],
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=COLORS["line"],
+                takefocus=True,
+                cursor="hand2",
+            )
+            row.grid(
+                row=index // 2,
+                column=index % 2,
+                sticky="ew",
+                padx=(0, 5) if index % 2 == 0 else (5, 0),
+                pady=(0, 7),
+            )
+            row.grid_columnconfigure(1, weight=1)
+            swatch = tk.Canvas(
+                row,
+                width=118,
+                height=28,
+                bg=COLORS["card_alt"],
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
+            swatch.grid(row=0, column=0, rowspan=2, sticky="w", padx=(9, 11), pady=8)
+            label = tk.Label(
+                row,
+                text=THEME_LABELS[name],
+                bg=COLORS["card_alt"],
+                fg=COLORS["text"],
+                font=(FONT, 9, "bold"),
+                anchor="w",
+                cursor="hand2",
+            )
+            label.grid(row=0, column=1, sticky="sew", pady=(6, 0))
+            source = tk.Label(
+                row,
+                text=f"参考 {THEME_SOURCES[name][0]} 官方配色",
+                bg=COLORS["card_alt"],
+                fg=COLORS["muted"],
+                font=(FONT, 7),
+                anchor="w",
+                cursor="hand2",
+            )
+            source.grid(row=1, column=1, sticky="new", pady=(0, 6))
+            marker = tk.Label(
+                row,
+                bg=COLORS["card_alt"],
+                fg=COLORS["accent"],
+                font=(FONT, 8, "bold"),
+                width=4,
+                cursor="hand2",
+            )
+            marker.grid(row=0, column=2, rowspan=2, sticky="e", padx=(5, 8))
+            self.rows[name] = (row, swatch, label, source, marker)
+            for widget in (row, swatch, label, source, marker):
+                widget.bind("<Button-1>", lambda _event, selected=name: self.choose(selected), add="+")
+                widget.bind("<Enter>", lambda _event, selected=name: self._set_hover(selected, True), add="+")
+                widget.bind("<Leave>", lambda _event, selected=name: self._set_hover(selected, False), add="+")
+            row.bind("<Return>", lambda _event, selected=name: self.choose(selected))
+            row.bind("<space>", lambda _event, selected=name: self.choose(selected))
+
+        for widget in (self.header, self.header_swatch, self.header_name, self.header_source):
+            widget.bind("<Button-1>", lambda _event: self.toggle(), add="+")
+        self.header.bind("<Return>", lambda _event: self.toggle())
+        self.header.bind("<space>", lambda _event: self.toggle())
+        self.apply_theme()
+
+    @staticmethod
+    def _draw_swatch(canvas: tk.Canvas, palette: Mapping[str, str]) -> None:
+        canvas.delete("all")
+        width = int(canvas.cget("width"))
+        height = int(canvas.cget("height"))
+        segment = width / len(ThemePalettePicker.SWATCH_ROLES)
+        for index, role in enumerate(ThemePalettePicker.SWATCH_ROLES):
+            left = round(index * segment)
+            right = round((index + 1) * segment)
+            canvas.create_rectangle(left, 0, right + 1, height, fill=palette[role], outline="")
+        canvas.create_rectangle(0, 0, width - 1, height - 1, outline=palette["line"])
+
+    def toggle(self) -> str:
+        self.expanded = not self.expanded
+        if self.expanded:
+            self.gallery.pack(fill="x", padx=10, pady=(10, 3))
+        else:
+            self.gallery.pack_forget()
+        self._update_header()
+        return "break"
+
+    def choose(self, theme: str) -> str:
+        if theme not in THEMES:
+            return "break"
+        self.set_theme(theme)
+        self.command(theme)
+        return "break"
+
+    def set_theme(self, theme: str) -> None:
+        if theme not in THEMES:
+            return
+        self.theme = theme
+        self.apply_theme()
+
+    def _set_hover(self, theme: str, hovered: bool) -> None:
+        if theme not in self.rows or theme == self.theme:
+            return
+        background = COLORS["key"] if hovered else COLORS["card_alt"]
+        row, swatch, label, source, marker = self.rows[theme]
+        row.configure(bg=background)
+        swatch.configure(bg=background)
+        label.configure(bg=background)
+        source.configure(bg=background)
+        marker.configure(bg=background)
+
+    def _update_header(self) -> None:
+        source_name = THEME_SOURCES[self.theme][0]
+        self.header_name.configure(text=THEME_LABELS[self.theme])
+        self.header_source.configure(text=f"参考 {source_name} 官方配色 · 已针对曜衡深色界面降低刺激度")
+        self.toggle_button.configure(
+            text="收回主题列表  ▴" if self.expanded else f"展开全部 {len(THEMES)} 套  ▾"
+        )
+        self._draw_swatch(self.header_swatch, THEMES[self.theme])
+
+    def apply_theme(self) -> None:
+        self.configure(bg=COLORS["card"], highlightbackground=COLORS["line"])
+        self.header.configure(bg=COLORS["card_alt"])
+        self.header_swatch.configure(bg=COLORS["card_alt"])
+        self.header_name.configure(bg=COLORS["card_alt"], fg=COLORS["text"])
+        self.header_source.configure(bg=COLORS["card_alt"], fg=COLORS["muted"])
+        self.toggle_button.configure(
+            bg=COLORS["card_alt"],
+            fg=COLORS["accent"],
+            activebackground=COLORS["accent_dark"],
+            activeforeground=COLORS["accent"],
+        )
+        self.gallery.configure(bg=COLORS["card"])
+        for name, (row, swatch, label, source, marker) in self.rows.items():
+            selected = name == self.theme
+            background = COLORS["selection"] if selected else COLORS["card_alt"]
+            foreground = COLORS["selection_text"] if selected else COLORS["text"]
+            secondary = COLORS["selection_text"] if selected else COLORS["muted"]
+            row.configure(bg=background, highlightbackground=COLORS["accent"] if selected else COLORS["line"])
+            swatch.configure(bg=background)
+            label.configure(bg=background, fg=foreground)
+            source.configure(bg=background, fg=secondary)
+            marker.configure(
+                text="当前" if selected else "",
+                bg=background,
+                fg=COLORS["selection_text"] if selected else COLORS["accent"],
+            )
+            self._draw_swatch(swatch, THEMES[name])
+        self._update_header()
 
 
 class TreeSelectionBorder:
@@ -3115,6 +3352,7 @@ class SettingsPage(tk.Frame):
         self.theme_var = tk.StringVar(
             value=self.theme_name_to_display.get(settings.theme, THEME_LABELS["dark"])
         )
+        self.theme_cycle_var = tk.StringVar(value=self._theme_cycle_text(settings.theme))
         self.timezone_var = tk.StringVar()
         self.timezone_clock_var = tk.StringVar()
         self.keep_var = tk.BooleanVar(value=settings.keep_data_with_app)
@@ -3153,7 +3391,6 @@ class SettingsPage(tk.Frame):
         self.timezone_values = self._timezone_displays()
         self.timezone_options_hour = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d%H")
         self.timezone_var.set(self.zone_name_to_display.get(settings.timezone, settings.timezone))
-        self.theme_preview: dict[str, tk.Frame] = {}
         self._build()
         self.refresh_cache_size()
         self.timezone_job: str | None = None
@@ -3187,44 +3424,22 @@ class SettingsPage(tk.Frame):
         appearance = self._card(
             body,
             "外观主题",
-            f"{len(THEMES)} 套低刺激主题即时切换，布局与字号保持不变",
+            f"{len(THEMES)} 套成熟配色适配主题；每套都有独立色块预览，布局与字号保持不变",
             0,
             0,
+            columnspan=2,
         )
-        theme_row = tk.Frame(appearance, bg=COLORS["card"])
-        theme_row.pack(fill="x", padx=20, pady=(12, 8))
-        self.theme_combo = SearchSelect(
-            theme_row,
-            self.theme_var,
-            values=list(THEME_LABELS.values()),
-            command=self._set_theme,
-            width=34,
-            font_size=10,
-            max_rows=10,
-        )
-        self.theme_combo.pack(fill="x")
-        preview_row = tk.Frame(appearance, bg=COLORS["card"])
-        preview_row.pack(fill="x", padx=20, pady=(0, 8))
-        for role in ("bg", "card", "accent", "text", "up", "down"):
-            swatch = tk.Frame(
-                preview_row,
-                bg=COLORS[role],
-                height=12,
-                highlightthickness=1,
-                highlightbackground=COLORS["line"],
-            )
-            swatch.pack(side="left", expand=True, fill="x", padx=(0, 4))
-            swatch.pack_propagate(False)
-            self.theme_preview[role] = swatch
+        self.theme_picker = ThemePalettePicker(appearance, self.settings.theme, self._set_theme)
+        self.theme_picker.pack(fill="x", padx=20, pady=(12, 8))
         tk.Label(
             appearance,
-            text="柔和底色 · 克制饱和度 · 正文与关键控件保持清晰对比",
+            text="色块依次展示背景、卡片、强调色、上涨色与下跌色；展开后点击任意主题即可即时预览。",
             bg=COLORS["card"],
             fg=COLORS["muted"],
             font=(FONT, 8),
         ).pack(anchor="w", padx=20, pady=(0, 18))
 
-        timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 0, 1)
+        timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 1, 0)
         self.timezone_combo = SearchSelect(timezone_card, self.timezone_var, values=self.timezone_values, command=self._set_timezone, width=34, font_size=10, max_rows=8)
         self.timezone_combo.pack(fill="x", padx=20, pady=(12, 7))
         tk.Label(
@@ -3232,7 +3447,7 @@ class SettingsPage(tk.Frame):
             font=(FONT, 9, "bold"), padx=10, pady=6,
         ).pack(fill="x", padx=20, pady=(0, 18))
 
-        refresh_card = self._card(body, "自动刷新", "货币与虚拟币使用独立分钟间隔", 1, 0)
+        refresh_card = self._card(body, "自动刷新", "货币与虚拟币使用独立分钟间隔", 1, 1)
         self._check(refresh_card, "启用自动刷新", self.auto_refresh_var, "auto_refresh_enabled")
         intervals = tk.Frame(refresh_card, bg=COLORS["card"])
         intervals.pack(fill="x", padx=20, pady=(5, 7))
@@ -3240,13 +3455,13 @@ class SettingsPage(tk.Frame):
         self._number_field(intervals, "虚拟币", self.crypto_minutes_var, "crypto_refresh_minutes", 1, 1440, 10).pack(side="left", expand=True, fill="x", padx=(5, 0))
         self._check(refresh_card, "最小化后继续按设定时间刷新", self.refresh_minimized_var, "refresh_when_minimized", pady=(2, 16))
 
-        startup = self._card(body, "启动与关闭", "曜衡只运行一个窗口；重复启动会唤醒现有窗口", 1, 1)
+        startup = self._card(body, "启动与关闭", "曜衡只运行一个窗口；重复启动会唤醒现有窗口", 2, 0, columnspan=2)
         self._select_row(startup, "默认启动页面", self.startup_page_var, list(self.PAGE_LABELS.values()), lambda value: self._save("startup_page", self._reverse(self.PAGE_LABELS, value)))
         self._select_row(startup, "点击关闭按钮", self.close_action_var, list(self.CLOSE_LABELS.values()), lambda value: self._save("close_action", self._reverse(self.CLOSE_LABELS, value)))
         self._check(startup, "记住上次打开的页面", self.remember_page_var, "remember_last_page")
         self._check(startup, "记住窗口大小和位置", self.remember_geometry_var, "remember_window_geometry", pady=(2, 16))
 
-        calculator = self._card(body, "计算器", "模式、角度、历史记录与复制格式", 2, 0, columnspan=2)
+        calculator = self._card(body, "计算器", "模式、角度、历史记录与复制格式", 3, 0, columnspan=2)
         calc_grid = tk.Frame(calculator, bg=COLORS["card"])
         calc_grid.pack(fill="x", padx=20, pady=(9, 4))
         for column in range(3):
@@ -3261,7 +3476,7 @@ class SettingsPage(tk.Frame):
         history_field = self._number_field(calc_checks, "历史记录条数", self.history_limit_var, "history_limit", 1, 200, 30)
         history_field.pack(side="right", fill="x")
 
-        storage = self._card(body, "应用与缓存位置", "绿色版可整体迁移，也可单独指定数据目录", 3, 0, columnspan=2)
+        storage = self._card(body, "应用与缓存位置", "绿色版可整体迁移，也可单独指定数据目录", 4, 0, columnspan=2)
         storage_content = tk.Frame(storage, bg=COLORS["card"])
         storage_content.pack(fill="x")
         storage_content.grid_columnconfigure(0, weight=1)
@@ -3270,7 +3485,7 @@ class SettingsPage(tk.Frame):
         keep = tk.Checkbutton(storage_content, text="应用与相关数据全部放在同一文件夹", variable=self.keep_var, command=lambda: self.data_callback(self.keep_var.get()), **self._check_style())
         keep.grid(row=6, column=0, columnspan=3, sticky="w", padx=20, pady=(2, 16))
 
-        api = self._card(body, "API 接入", "供本机微信、QQ、Telegram 等机器人桥接；曜衡本身只监听回环地址", 4, 0, columnspan=2)
+        api = self._card(body, "API 接入", "供本机微信、QQ、Telegram 等机器人桥接；曜衡本身只监听回环地址", 5, 0, columnspan=2)
         api_row = tk.Frame(api, bg=COLORS["card"])
         api_row.pack(fill="x", padx=20, pady=(10, 6))
         tk.Checkbutton(
@@ -3316,7 +3531,7 @@ class SettingsPage(tk.Frame):
             body,
             "软件更新",
             "从曜衡官方 GitHub Release 检查更新；安装包下载后必须通过 SHA-256 校验",
-            5,
+            6,
             0,
             columnspan=2,
         )
@@ -3349,7 +3564,7 @@ class SettingsPage(tk.Frame):
             wraplength=960, justify="left",
         ).pack(anchor="w", padx=20, pady=(0, 16))
 
-        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 6, 0, columnspan=2)
+        cache = self._card(body, "缓存与设置管理", "限制缓存占用、清理缓存以及导入导出设置", 7, 0, columnspan=2)
         tools = tk.Frame(cache, bg=COLORS["card"])
         tools.pack(fill="x", padx=20, pady=(10, 8))
         tk.Label(tools, textvariable=self.cache_size_var, bg=COLORS["card_alt"], fg=COLORS["accent"], font=(FONT, 9, "bold"), padx=12, pady=8).pack(side="left")
@@ -3364,6 +3579,35 @@ class SettingsPage(tk.Frame):
         ):
             AppButton(actions, text, callback, kind, 9).pack(side="left", padx=(0, 8), ipadx=7, ipady=6)
 
+        theme_cycle = self._card(
+            body,
+            "快速切换主题",
+            "不展开主题列表也能按上方展示顺序逐套切换",
+            8,
+            0,
+            columnspan=2,
+        )
+        cycle_row = tk.Frame(theme_cycle, bg=COLORS["card"])
+        cycle_row.pack(fill="x", padx=20, pady=(10, 18))
+        tk.Label(
+            cycle_row,
+            textvariable=self.theme_cycle_var,
+            bg=COLORS["card_alt"],
+            fg=COLORS["muted"],
+            font=(FONT, 9, "bold"),
+            anchor="w",
+            padx=12,
+            pady=9,
+        ).pack(side="left", expand=True, fill="x", padx=(0, 12))
+        self.theme_cycle_button = AppButton(
+            cycle_row,
+            "切换下一个主题",
+            self._next_theme,
+            "accent",
+            9,
+        )
+        self.theme_cycle_button.pack(side="left", ipadx=10, ipady=6)
+
         self._bind_mousewheel(body)
 
     def _card(self, parent: tk.Misc, title: str, subtitle: str, row: int, column: int, columnspan: int = 1) -> tk.Frame:
@@ -3376,6 +3620,13 @@ class SettingsPage(tk.Frame):
     @staticmethod
     def _reverse(mapping: dict[str, str], value: str) -> str:
         return next((key for key, label in mapping.items() if label == value), next(iter(mapping)))
+
+    @staticmethod
+    def _theme_cycle_text(theme: str) -> str:
+        order = tuple(THEMES)
+        current = theme if theme in THEMES else order[0]
+        following = order[(order.index(current) + 1) % len(order)]
+        return f"当前：{THEME_LABELS[current]}    下一套：{THEME_LABELS[following]}"
 
     @staticmethod
     def _check_style() -> dict[str, object]:
@@ -3634,14 +3885,12 @@ class SettingsPage(tk.Frame):
             return
         self.theme_var.set(self.theme_name_to_display[selected])
         self.theme_callback(selected)
-        self._update_theme_preview()
+        self.theme_cycle_var.set(self._theme_cycle_text(selected))
 
-    def _update_theme_preview(self) -> None:
-        for role, swatch in self.theme_preview.items():
-            try:
-                swatch.configure(bg=COLORS[role], highlightbackground=COLORS["line"])
-            except tk.TclError:
-                return
+    def _next_theme(self) -> None:
+        order = tuple(THEMES)
+        current = self.settings.theme if self.settings.theme in THEMES else order[0]
+        self._set_theme(order[(order.index(current) + 1) % len(order)])
 
     def _timezone_displays(self, now: datetime | None = None) -> list[str]:
         now = now or datetime.now(ZoneInfo("UTC"))
@@ -4719,10 +4968,13 @@ class YaohengApp:
 
         supported_options: dict[type[object], tuple[str, ...]] = {}
         themed_selects: list[SearchSelect] = []
+        themed_palette_pickers: list[ThemePalettePicker] = []
 
         def recolor(widget: tk.Misc) -> None:
             if isinstance(widget, SearchSelect):
                 themed_selects.append(widget)
+            if isinstance(widget, ThemePalettePicker):
+                themed_palette_pickers.append(widget)
             changes: dict[str, str] = {}
             widget_type = type(widget)
             options = supported_options.get(widget_type)
@@ -4756,6 +5008,12 @@ class YaohengApp:
 
         for select in themed_selects:
             select.apply_theme()
+        for picker in themed_palette_pickers:
+            picker.set_theme(theme)
+        settings_page = self.pages.get("settings")
+        if isinstance(settings_page, SettingsPage):
+            settings_page.theme_var.set(THEME_LABELS[theme])
+            settings_page.theme_cycle_var.set(settings_page._theme_cycle_text(theme))
         for key in ("fiat", "crypto"):
             page = self.pages.get(key)
             if isinstance(page, DualConverterPage):

@@ -255,6 +255,7 @@ class V320TkTests(unittest.TestCase):
                 for theme in theme_order:
                     app.set_theme(theme)
                     self.assertEqual(dict(COLORS), THEMES[theme])
+                    self.assertEqual(app.pages["settings"].theme_picker.theme, theme)
                     self.assertLess(app.last_theme_switch_ms, 100)
                 app.root.update_idletasks()
             finally:
