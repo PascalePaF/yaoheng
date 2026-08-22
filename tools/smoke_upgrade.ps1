@@ -38,6 +38,9 @@ if (-not (Test-Path -LiteralPath $InnoCompiler -PathType Leaf)) {
 }
 $InstallerScript = Join-Path $ProjectRoot "installer\installer.iss"
 $AppProcess = $null
+$TestInstanceEnvironmentName = "YAO_HENG_TEST_INSTANCE_TOKEN"
+$HadTestInstanceEnvironment = Test-Path -LiteralPath ("Env:" + $TestInstanceEnvironmentName)
+$PreviousTestInstanceEnvironment = [System.Environment]::GetEnvironmentVariable($TestInstanceEnvironmentName, "Process")
 
 function Invoke-CheckedProcess {
     param(
@@ -116,6 +119,14 @@ try {
         -Destination (Join-Path $InstallDir "app_settings.json") `
         -Force
     $InstalledExecutable = Join-Path $InstallDir "曜衡.exe"
+    # Keep the packaged single-instance check isolated from a real Yaoheng that
+    # the developer may already be running. Only a strict random 32-hex token is
+    # accepted by the application; ordinary launches keep the production mutex.
+    [System.Environment]::SetEnvironmentVariable(
+        $TestInstanceEnvironmentName,
+        [guid]::NewGuid().ToString("N"),
+        "Process"
+    )
     $AppProcess = Start-Process `
         -FilePath $InstalledExecutable `
         -WorkingDirectory $InstallDir `
@@ -165,5 +176,15 @@ finally {
             throw "Refusing unsafe smoke-test cleanup: $ResolvedSmokeRoot"
         }
         [System.IO.Directory]::Delete($ResolvedSmokeRoot, $true)
+    }
+    if ($HadTestInstanceEnvironment) {
+        [System.Environment]::SetEnvironmentVariable(
+            $TestInstanceEnvironmentName,
+            $PreviousTestInstanceEnvironment,
+            "Process"
+        )
+    }
+    else {
+        [System.Environment]::SetEnvironmentVariable($TestInstanceEnvironmentName, $null, "Process")
     }
 }

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import requests
 
 from app_ui import SettingsPage, YaohengApp
-from single_instance import SingleInstance
+from single_instance import INSTANCE_NAME, SingleInstance, resolve_instance_name
 from theme_catalog import THEMES, THEME_LABELS
 from update_service import (
     GitHubUpdateService,
@@ -241,6 +241,9 @@ class MemoryKernelBackend:
 
 class SingleInstanceTests(unittest.TestCase):
     def test_later_launch_signals_primary_and_exits(self):
+        token = "a" * 32
+        self.assertEqual(resolve_instance_name(token), f"{INSTANCE_NAME}.Test.{token}")
+        self.assertEqual(resolve_instance_name("not-a-valid-test-token"), INSTANCE_NAME)
         backend = MemoryKernelBackend()
         first = SingleInstance("Local\\Yaoheng.Test", backend=backend)
         second = SingleInstance("Local\\Yaoheng.Test", backend=backend)

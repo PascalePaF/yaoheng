@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import ctypes
+import os
+import re
 import sys
 from typing import Any, Protocol
 
 
 INSTANCE_NAME = "Local\\Yaoheng.49A035BF-7BEC-4FE1-84C4-EEBFD503A917.Instance.v1"
 ACTIVATION_EVENT_NAME = f"{INSTANCE_NAME}.Activate"
+TEST_INSTANCE_ENV = "YAO_HENG_TEST_INSTANCE_TOKEN"
+_TEST_TOKEN_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def resolve_instance_name(test_token: str | None = None) -> str:
+    """Return the production name, or a validated namespace for isolated smoke tests."""
+
+    token = os.environ.get(TEST_INSTANCE_ENV, "") if test_token is None else str(test_token)
+    normalized = token.strip().lower()
+    if _TEST_TOKEN_PATTERN.fullmatch(normalized):
+        return f"{INSTANCE_NAME}.Test.{normalized}"
+    return INSTANCE_NAME
 
 
 class SingleInstanceError(RuntimeError):
@@ -101,10 +115,11 @@ class SingleInstance:
 
     def __init__(
         self,
-        name: str = INSTANCE_NAME,
+        name: str | None = None,
         *,
         backend: _KernelBackend | None = None,
     ) -> None:
+        name = resolve_instance_name() if name is None else name
         self._backend = backend
         self._event: Any = None
         self._mutex: Any = None
@@ -177,7 +192,9 @@ def show_startup_error(message: str) -> None:
 __all__ = [
     "ACTIVATION_EVENT_NAME",
     "INSTANCE_NAME",
+    "TEST_INSTANCE_ENV",
     "SingleInstance",
     "SingleInstanceError",
+    "resolve_instance_name",
     "show_startup_error",
 ]
