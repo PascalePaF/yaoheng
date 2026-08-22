@@ -149,7 +149,7 @@ def _default_pages() -> dict[str, dict[str, Any]]:
             "active_side": "a",
             "table_base": "CNY",
             "reference_amount": "1",
-            "mode": "c2c",
+            "mode": "market",
             "provider": "auto",
             "payment_method": "",
             "favorites": [],
@@ -401,6 +401,11 @@ def _validate_pages(value: object, settings: AppSettings) -> dict[str, dict[str,
     # validation prevents a stale page copy from undoing legacy UI changes.
     for page_name, legacy_state in _legacy_page_state(settings).items():
         validated[page_name].update(legacy_state)
+    # V3.21.2 separates ordinary crypto conversion from the dedicated C2C
+    # page, including when an older settings file remembered C2C here.
+    validated["crypto"]["mode"] = "market"
+    validated["crypto"]["provider"] = "auto"
+    validated["crypto"]["payment_method"] = ""
     return validated
 
 

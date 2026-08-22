@@ -62,6 +62,12 @@ COLORS = dict(THEMES["dark"])
 FONT = "Microsoft YaHei UI"
 BRAND_ORANGE = "#FF9D2E"
 BRAND_DARK = "#171717"
+NETWORK_STATUS_PALETTES: Mapping[object, tuple[str, str]] = {
+    True: ("#0B3A2A", "#71F6B5"),
+    False: ("#471A23", "#FF9AA8"),
+    "partial": ("#44340C", "#FFD66B"),
+    None: ("#14324A", "#8FD3FF"),
+}
 _FULL_WIDTH_INPUT_TRANSLATION = str.maketrans({
     **{chr(ord("０") + index): str(index) for index in range(10)},
     "＋": "+", "－": "-", "＊": "*", "／": "/", "％": "%",
@@ -72,6 +78,25 @@ _FULL_WIDTH_INPUT_TRANSLATION = str.maketrans({
 def normalize_amount_input(value: str) -> str:
     """Normalize IME/full-width amount input before UI-side validation."""
     return value.translate(_FULL_WIDTH_INPUT_TRANSLATION)
+
+
+def connection_status_state(value: object) -> bool | str | None:
+    """Classify visible connection text without borrowing theme colors."""
+
+    text = str(value or "").casefold()
+    failure_terms = (
+        "失败", "错误", "不可用", "未运行", "无法", "failed", "error",
+        "unavailable", "not running", "失敗", "利用できません",
+    )
+    success_terms = ("连接成功", "运行中", "connected", "running", "接続済み")
+    partial_terms = ("部分", "警告", "已启用但", "partial", "warning", "一部")
+    if any(term in text for term in failure_terms):
+        return False
+    if any(term in text for term in success_terms):
+        return True
+    if any(term in text for term in partial_terms):
+        return "partial"
+    return None
 
 
 def visible_window_position(
@@ -1252,6 +1277,8 @@ class CalculatorPage(tk.Frame):
         self.animating = False
         self.expression_var = tk.StringVar(value="0")
         self.result_var = DisplayStringVar(value="0")
+        self.formula_var = DisplayStringVar(value="输入算式")
+        self.inline_history_vars = [DisplayStringVar(value=" ") for _ in range(2)]
         self.mode_var = DisplayStringVar(value="标准模式 · 苹果式键盘 · 直接输入公式")
         self._updating_expression = False
         self.keys: list[CalculatorKey] = []
@@ -1280,31 +1307,49 @@ class CalculatorPage(tk.Frame):
         self.stage_host.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 24))
         self.stage_host.bind("<Configure>", self._resize_stage, add="+")
         self.stage = tk.Frame(self.stage_host, bg=COLORS["calculator_bg"])
-        self.stage.place(relx=0.5, rely=0, anchor="n", relheight=1.0, width=520)
+        self.stage.place(relx=0.5, rely=0, anchor="n", relheight=1.0, width=640)
         self.stage.grid_columnconfigure(0, weight=1)
         self.stage.grid_rowconfigure(1, weight=1)
-        display = tk.Frame(self.stage, bg=COLORS["display_bg"], height=150)
+        display = tk.Frame(self.stage, bg=COLORS["display_bg"], height=230)
         display.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         display.grid_propagate(False)
         display.grid_columnconfigure(0, weight=1)
+        display.grid_rowconfigure(3, weight=1)
         self.display_frame = display
+        self.inline_history_labels: list[tk.Label] = []
+        for row, variable in enumerate(self.inline_history_vars):
+            label = tk.Label(
+                display, textvariable=variable, bg=COLORS["display_bg"],
+                fg=COLORS["display_expression"], font=("Segoe UI", 11),
+                anchor="e", padx=26,
+            )
+            label.grid(row=row, column=0, sticky="ew", pady=((13, 1) if row == 0 else 1))
+            label.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
+            self.inline_history_labels.append(label)
+        self.formula_label = tk.Label(
+            display, textvariable=self.formula_var, bg=COLORS["display_bg"],
+            fg=COLORS["display_expression"], font=("Segoe UI", 16),
+            anchor="e", padx=26,
+        )
+        self.formula_label.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+        self.formula_label.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
         self.expression_entry = tk.Entry(
-            display, textvariable=self.expression_var, bg=COLORS["display_bg"], fg=COLORS["display_expression"],
+            display, textvariable=self.expression_var, bg=COLORS["display_bg"], fg=COLORS["display_text"],
             insertbackground=COLORS["display_text"], insertwidth=2,
             selectbackground=COLORS["selection"], selectforeground=COLORS["selection_text"],
-            font=("Segoe UI", 18), justify="right", relief="flat", bd=0,
+            font=("Segoe UI", 48), justify="right", relief="flat", bd=0,
             highlightthickness=0, takefocus=True,
         )
-        self.expression_entry.grid(row=0, column=0, sticky="ew", padx=26, pady=(23, 0))
+        self.expression_entry.grid(row=3, column=0, sticky="ew", padx=24, pady=(3, 14), ipady=5)
         self.expression_entry.bind("<FocusIn>", self._expression_focus_in)
         self.expression_entry.bind("<KeyPress>", self._expression_keypress, add="+")
         self.expression_entry.bind("<Return>", self._evaluate_manual_expression)
         self.expression_entry.bind("<KP_Enter>", self._evaluate_manual_expression)
         self.expression_var.trace_add("write", self._manual_expression_changed)
-        self.result_label = tk.Label(display, textvariable=self.result_var, bg=COLORS["display_bg"], fg=COLORS["display_text"], font=("Segoe UI", 40), anchor="e", padx=24)
-        self.result_label.grid(row=1, column=0, sticky="ew", pady=(2, 18))
+        # Compatibility alias for integrations that used the former result
+        # label. The editable large-number field is now the result surface.
+        self.result_label = self.formula_label
         display.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
-        self.result_label.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
 
         self.keypad_area = tk.Frame(self.stage, bg=COLORS["calculator_bg"])
         self.keypad_area.grid(row=1, column=0, sticky="nsew")
@@ -1335,10 +1380,21 @@ class CalculatorPage(tk.Frame):
                 column += span
 
     def _resize_stage(self, event: tk.Event) -> None:
-        available = max(320, int(event.width) - 8)
-        maximum = 720 if self.professional else 540
-        self.stage.place_configure(width=max(340, min(maximum, available)))
-        self.display_frame.configure(height=max(118, min(180, int(event.height * 0.24))))
+        self._resize_stage_to(int(event.width), int(event.height))
+
+    def _resize_stage_to(self, width: int, height: int) -> None:
+        available = max(340, width - 8)
+        height = max(320, height)
+        self.stage.place_configure(width=available)
+        display_height = max(176, min(290, int(height * (0.34 if self.professional else 0.31))))
+        self.display_frame.configure(height=display_height)
+        large_size = max(30, min(68, int(available / 13), int(display_height * 0.27)))
+        formula_size = max(12, min(21, int(available / 38)))
+        history_size = max(9, min(14, int(available / 58)))
+        self.expression_entry.configure(font=("Segoe UI", large_size))
+        self.formula_label.configure(font=("Segoe UI", formula_size))
+        for label in self.inline_history_labels:
+            label.configure(font=("Segoe UI", history_size))
 
     def set_history_open(self, is_open: bool) -> None:
         self.history_button.configure(text="关闭历史记录" if is_open else "打开历史记录")
@@ -1355,7 +1411,9 @@ class CalculatorPage(tk.Frame):
         self.mode_button.configure(text="标准" if professional else "专业")
         self.mode_var.set("专业模式 · 科学键盘 · 直接输入公式" if professional else "标准模式 · 苹果式键盘 · 直接输入公式")
         try:
-            self.stage.place_configure(width=720 if professional else 520)
+            self._resize_stage_to(
+                self.stage_host.winfo_width(), self.stage_host.winfo_height()
+            )
         except (AttributeError, tk.TclError):
             pass
 
@@ -1376,7 +1434,12 @@ class CalculatorPage(tk.Frame):
             if whole.isdigit() and (not dot or fraction.isdigit()):
                 result = sign + f"{int(whole):,}" + (dot + fraction if fraction else "")
         elif self.copy_result_format == "formula":
-            result = f"{self.expression_var.get()} = {result}"
+            expression = (
+                self.model.history[0][0]
+                if self.model.just_evaluated and self.model.history
+                else self.expression_var.get()
+            )
+            result = f"{expression} = {result}"
         self.clipboard_clear()
         self.clipboard_append(result)
         self.copy_button.configure(text="已复制")
@@ -1414,6 +1477,12 @@ class CalculatorPage(tk.Frame):
             if not self.professional:
                 self.pro_frame.place_forget()
                 self.standard_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+            try:
+                self._resize_stage_to(
+                    self.stage_host.winfo_width(), self.stage_host.winfo_height()
+                )
+            except tk.TclError:
+                pass
 
         step(0)
 
@@ -1511,6 +1580,7 @@ class CalculatorPage(tk.Frame):
             self.expression_var.set(self.model.expression)
             self._updating_expression = False
         self.result_var.set(self.model.preview() or "0")
+        self._refresh_context_lines()
 
     def _evaluate_manual_expression(self, _event: tk.Event | None = None) -> str:
         try:
@@ -1530,6 +1600,27 @@ class CalculatorPage(tk.Frame):
         self.expression_var.set(expression)
         self._updating_expression = False
         self.result_var.set(self.model.preview() or "0")
+        self._refresh_context_lines()
+
+    def _refresh_context_lines(self) -> None:
+        """Render two durable prior calculations and the active formula."""
+
+        history = list(self.model.history)
+        if self.model.just_evaluated and history:
+            active_expression, _active_result = history[0]
+            prior = history[1:3]
+            self.formula_var.set(f"{active_expression} =")
+        else:
+            prior = history[:2]
+            expression = self.expression_var.get().strip()
+            preview = self.result_var.get().strip()
+            self.formula_var.set(
+                f"实时结果  =  {preview}" if expression and expression != "0" else "输入算式"
+            )
+        rendered = [f"{expression} = {result}" for expression, result in reversed(prior)]
+        rendered = ([" "] * (2 - len(rendered))) + rendered
+        for variable, text in zip(self.inline_history_vars, rendered):
+            variable.set(text)
 
     def on_show(self) -> None:
         self.after_jobs.schedule(0, self.activate_keyboard, idle=True)
@@ -1615,8 +1706,10 @@ class DualConverterPage(tk.Frame):
         self.rate_var = DisplayStringVar(value="在任意一端输入金额或算式，按回车、= 或点击输入框外完成计算与换算")
         restored_side = str(restored.get("active_side", "a")).lower()
         self.active_side = restored_side if restored_side in {"a", "b", "c"} else "a"
-        restored_exchange_mode = str(restored.get("mode", "market")).lower()
-        self.exchange_mode = restored_exchange_mode if restored_exchange_mode in {"market", "c2c"} else "market"
+        # The dedicated C2C page owns all peer-to-peer quotes. This three-way
+        # crypto page deliberately mirrors Market Exchange and never switches
+        # to an amount-matched C2C price.
+        self.exchange_mode = "market"
         restored_provider = str(restored.get("provider", "auto")).lower()
         self.c2c_provider = restored_provider if restored_provider in PROVIDER_LABELS else "auto"
         restored_payment = str(restored.get("payment_method", ""))
@@ -1675,24 +1768,10 @@ class DualConverterPage(tk.Frame):
         self.provider_combo: ttk.Combobox | None = None
         self.payment_combo: ttk.Combobox | None = None
         if self.mode == "crypto":
-            c2c_controls = tk.Frame(header, bg=COLORS["card"])
-            c2c_controls.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-            c2c_controls.grid_columnconfigure(1, weight=1)
-            c2c_controls.grid_columnconfigure(3, weight=1)
-            c2c_controls.grid_columnconfigure(5, weight=2)
-            tk.Label(c2c_controls, text="换算模式", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=0, padx=(12, 6), pady=8)
-            self.mode_combo = ttk.Combobox(c2c_controls, textvariable=self.mode_var, values=(tr("普通汇率"), tr("C2C 按金额")), state="readonly", width=14)
-            self.mode_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
-            self.mode_combo.bind("<<ComboboxSelected>>", self._crypto_mode_changed)
-            tk.Label(c2c_controls, text="来源", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=2, padx=(0, 6))
-            self.provider_combo = ttk.Combobox(c2c_controls, textvariable=self.provider_var, values=tuple(self._provider_labels().values()), state="readonly", width=11)
-            self.provider_combo.grid(row=0, column=3, sticky="ew", padx=(0, 10), pady=6)
-            self.provider_combo.bind("<<ComboboxSelected>>", self._crypto_provider_changed)
-            tk.Label(c2c_controls, text="支付", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=4, padx=(0, 6))
-            self.payment_combo = ttk.Combobox(c2c_controls, textvariable=self.payment_var, values=(tr(PAYMENT_UNKNOWN_LABEL),), state="readonly", width=24)
-            self.payment_combo.grid(row=0, column=5, sticky="ew", padx=(0, 12), pady=6)
-            self.payment_combo.bind("<<ComboboxSelected>>", self._crypto_payment_changed)
-            self._update_crypto_control_states()
+            tk.Label(
+                header, text="公开市场参考汇率（非 C2C）", bg=COLORS["card"],
+                fg=COLORS["text"], font=(FONT, 9, "bold"), padx=12, pady=8,
+            ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
 
         body = self.body = tk.Frame(self, bg=COLORS["bg"])
         body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 26))
@@ -2019,8 +2098,6 @@ class DualConverterPage(tk.Frame):
 
     def on_show(self) -> None:
         self.visible = True
-        if self.mode == "crypto":
-            self._refresh_crypto_payment_options()
         if self.current_snapshot is not None:
             self.convert_from(self.active_side)
 
@@ -3662,6 +3739,8 @@ class SettingsPage(tk.Frame):
         self.timezone_options_hour = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d%H")
         self.timezone_var.set(self.zone_name_to_display.get(settings.timezone, settings.timezone))
         self._build()
+        self.api_status_var.trace_add("write", self._api_status_changed)
+        self._apply_api_status_style()
         self.refresh_cache_size()
         self.timezone_job: str | None = None
         self._update_timezone_time()
@@ -3808,10 +3887,11 @@ class SettingsPage(tk.Frame):
             fg=COLORS["text"], relief="flat", bd=0, font=("Consolas", 9),
         ).pack(side="left", expand=True, fill="x", padx=10, ipady=6)
         AppButton(token_row, "复制", self._copy_api_token, "outline", 8).pack(side="left", ipady=4)
-        tk.Label(
+        self.api_status_label = tk.Label(
             api, textvariable=self.api_status_var, bg=COLORS["accent_dark"], fg=COLORS["accent"],
             font=(FONT, 9, "bold"), anchor="w", justify="left", padx=12, pady=8,
-        ).pack(fill="x", padx=20, pady=(0, 5))
+        )
+        self.api_status_label.pack(fill="x", padx=20, pady=(0, 5))
         tk.Label(
             api,
             text="明文令牌只在生成或轮换当次显示，请立即保存。支持 /health、/v1/capabilities、/v1/calculate、/v1/convert、/v1/command；不包含下单接口。",
@@ -3971,6 +4051,20 @@ class SettingsPage(tk.Frame):
 
     def refresh_api_status(self) -> None:
         self.api_status_var.set(self.api_status_getter())
+
+    def _api_status_changed(self, *_args: object) -> None:
+        self._apply_api_status_style()
+
+    def _apply_api_status_style(self) -> None:
+        label = getattr(self, "api_status_label", None)
+        if label is None:
+            return
+        state = connection_status_state(self.api_status_var.get())
+        bg, fg = NETWORK_STATUS_PALETTES[state]
+        try:
+            label.configure(bg=bg, fg=fg)
+        except tk.TclError:
+            pass
 
     def _toggle_api(self) -> None:
         status = self.api_enabled_callback(self.api_enabled_var.get())
@@ -4347,7 +4441,10 @@ class YaohengApp:
         self.history_width = 330
         self.last_network_at = ""
         self.last_network_detail = ""
+        self.network_state: bool | str | None = None
         self.auto_jobs: dict[str, str | None] = {"fiat": None, "crypto": None}
+        self.startup_job: str | None = None
+        self._page_open_refresh_enabled = False
         self.geometry_job: str | None = None
         self.exiting = False
         self.update_installing = False
@@ -4364,6 +4461,7 @@ class YaohengApp:
         self._prepare_theme_bindings(dict(COLORS))
         start_page = self.settings.last_page if self.settings.remember_last_page else self.settings.startup_page
         self.show_page(start_page if start_page in self.pages else "calculator")
+        self._page_open_refresh_enabled = True
         self.root.bind_all("<KeyPress>", self.on_key, add="+")
         self.root.bind("<Configure>", self._queue_geometry_save, add="+")
         self.root.bind("<Configure>", self._responsive_window_changed, add="+")
@@ -4371,7 +4469,7 @@ class YaohengApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
         if self.service.snapshot.rates:
             self.apply_snapshot(self.service.snapshot, True)
-        self.startup_job = self.root.after(350, lambda: self.refresh_rates("all"))
+        self.startup_job = self.root.after(350, self._startup_rate_refresh)
         self.api_start_job = self.root.after(150, self._start_local_api_if_enabled)
         self.root.after(120, self._activate_calculator_if_current)
         self.root.after_idle(self._responsive_window_changed)
@@ -4447,10 +4545,11 @@ class YaohengApp:
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
         self.sidebar.grid_columnconfigure(0, weight=1)
+        self.sidebar.grid_columnconfigure(1, weight=1)
         self.sidebar.grid_rowconfigure(10, weight=1)
         brand = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
         self.sidebar_brand = brand
-        brand.grid(row=0, column=0, sticky="ew", padx=18, pady=(26, 32))
+        brand.grid(row=0, column=0, columnspan=2, sticky="ew", padx=18, pady=(26, 32))
         self.logo_canvas = tk.Canvas(brand, width=42, height=42, bg=COLORS["sidebar"], bd=0, highlightthickness=0)
         self.logo_canvas.pack(side="left")
         self._draw_logo()
@@ -4481,19 +4580,30 @@ class YaohengApp:
                 activeforeground=COLORS["sidebar_text"], relief="flat", bd=0, highlightthickness=0,
                 font=(FONT, font_size, "bold"), padx=left_pad, pady=(10 if font_size < 11 else 13), cursor="hand2",
             )
-            button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
+            button.grid(row=row, column=0, columnspan=2, sticky="ew", padx=10, pady=3)
             self.nav_buttons[key] = button
-        self.sidebar_theme_button = tk.Button(
-            self.sidebar, text="◐   下一主题", command=self.cycle_theme, anchor="w",
+        self.sidebar_previous_theme_button = tk.Button(
+            self.sidebar, text="上一主题", command=lambda: self.cycle_theme(-1), anchor="center",
             bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
             activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
             relief="flat", bd=0, highlightthickness=0, font=(FONT, 9, "bold"),
-            padx=22, pady=9, cursor="hand2",
+            padx=4, pady=9, cursor="hand2",
         )
-        self.sidebar_theme_button.grid(row=9, column=0, sticky="ew", padx=10, pady=(0, 3))
+        self.sidebar_previous_theme_button.grid(row=9, column=0, sticky="ew", padx=(10, 2), pady=(0, 3))
+        self.sidebar_next_theme_button = tk.Button(
+            self.sidebar, text="下一主题", command=lambda: self.cycle_theme(1), anchor="center",
+            bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
+            activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
+            relief="flat", bd=0, highlightthickness=0, font=(FONT, 9, "bold"),
+            padx=4, pady=9, cursor="hand2",
+        )
+        self.sidebar_next_theme_button.grid(row=9, column=1, sticky="ew", padx=(2, 10), pady=(0, 3))
+        # Backward-compatible name for integrations that target the former
+        # one-way button.
+        self.sidebar_theme_button = self.sidebar_next_theme_button
         footer = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
         self.sidebar_footer = footer
-        footer.grid(row=11, column=0, sticky="sew", padx=22, pady=20)
+        footer.grid(row=11, column=0, columnspan=2, sticky="sew", padx=22, pady=20)
         self.network_button = tk.Button(
             footer, text="●  正在准备联网  ↻", command=self.refresh_rates, anchor="center",
             bg=COLORS["accent_dark"], fg=COLORS["accent"], activebackground=COLORS["card_alt"],
@@ -4519,7 +4629,7 @@ class YaohengApp:
         calc_mode = self.settings.last_calculator_mode if self.settings.remember_calculator_mode else self.settings.default_calculator_mode
         history = [tuple(item[:2]) for item in self.settings.calculator_history] if self.settings.retain_history else []
         self.pages["calculator"] = CalculatorPage(
-            content, self.toggle_history, self.refresh_history,
+            content, self.toggle_history, self.calculator_history_changed,
             initial_professional=calc_mode == "professional", mode_changed=self.calculator_mode_changed,
             angle_mode=self.settings.calculator_angle_mode, history_limit=self.settings.history_limit,
             initial_history=history, copy_result_format=self.settings.copy_result_format,
@@ -4566,7 +4676,7 @@ class YaohengApp:
         self.pages["crypto"] = DualConverterPage(
             content, self.service, "crypto", self.refresh_rates, self.format_timestamp,
             self.settings.favorite_cryptos, self.settings.pinned_cryptos, self.save_currency_preferences,
-            coordinator=self.exchange_coordinator,
+            coordinator=None,
             page_state=self.settings.pages.get("crypto"),
             state_callback=lambda state: self.save_page_state("crypto", state),
         )
@@ -4606,10 +4716,11 @@ class YaohengApp:
         self.logo_canvas.create_line(10, 27, 21, 8, 32, 27, fill=BRAND_ORANGE, width=3, smooth=True)
         self.logo_canvas.create_polygon(21, 17, 27, 23, 21, 29, 15, 23, fill=BRAND_ORANGE, outline="")
 
-    def cycle_theme(self) -> None:
+    def cycle_theme(self, direction: int = 1) -> None:
         order = tuple(THEMES)
         current = self.settings.theme if self.settings.theme in THEMES else order[0]
-        self.set_theme(order[(order.index(current) + 1) % len(order)])
+        step = -1 if direction < 0 else 1
+        self.set_theme(order[(order.index(current) + step) % len(order)])
 
     def _responsive_window_changed(self, event: tk.Event | None = None) -> None:
         if event is not None and event.widget is not self.root:
@@ -4619,7 +4730,7 @@ class YaohengApp:
         if compact == self.sidebar_compact:
             return
         self.sidebar_compact = compact
-        self.sidebar.configure(width=76 if compact else 216)
+        self.sidebar.configure(width=136 if compact else 216)
         if compact:
             self.brand_names.pack_forget()
             self.sidebar_brand.grid_configure(padx=17, pady=(20, 22))
@@ -4634,11 +4745,11 @@ class YaohengApp:
                 padx=4 if compact else 22,
                 font=(FONT, 10 if compact else (9 if key in {"fiat_market", "market"} else 11), "bold"),
             )
-        self.sidebar_theme_button.configure(
-            text="◐" if compact else "◐   下一主题",
-            anchor="center" if compact else "w",
-            padx=4 if compact else 22,
-        )
+        for button, label in (
+            (self.sidebar_previous_theme_button, "上一主题"),
+            (self.sidebar_next_theme_button, "下一主题"),
+        ):
+            button.configure(text=label, anchor="center", padx=2 if compact else 4)
         if compact:
             self.network_status.pack_forget()
             self.network_time.pack_forget()
@@ -4695,6 +4806,33 @@ class YaohengApp:
                 bg=COLORS["nav_active"] if active else COLORS["sidebar"],
                 fg=COLORS["nav_active_text"] if active else COLORS["sidebar_muted"],
             )
+        if getattr(self, "_page_open_refresh_enabled", False):
+            self._refresh_page_on_open(page)
+
+    def _refresh_page_on_open(self, page: str) -> None:
+        section = {
+            "exchange": "all",
+            "market_exchange": "all",
+            "fiat": "fiat",
+            "fiat_market": "fiat",
+            "crypto": "crypto",
+            "market": "crypto",
+        }.get(page)
+        if section is None or getattr(self, "exiting", False):
+            return
+        startup_job = getattr(self, "startup_job", None)
+        if startup_job:
+            try:
+                self.root.after_cancel(startup_job)
+            except tk.TclError:
+                pass
+            self.startup_job = None
+        self.refresh_rates(section)
+
+    def _startup_rate_refresh(self) -> None:
+        self.startup_job = None
+        if not self.exiting:
+            self.refresh_rates("all")
 
     def _dismiss_search_popup(self, event: tk.Event) -> None:
         active = getattr(self.root, "_active_search_select", None)
@@ -4825,16 +4963,27 @@ class YaohengApp:
 
     def _set_network_status(self, connected: bool | str | None, time_text: str) -> None:
         if connected is True:
-            text, bg, fg = "当前网络连接成功！", COLORS["up_fill"], COLORS["up"]
+            text = "当前网络连接成功！"
         elif connected is False:
-            text, bg, fg = "当前网络连接失败！", COLORS["down_fill"], COLORS["down"]
+            text = "当前网络连接失败！"
         elif connected == "partial":
-            text, bg, fg = "部分数据更新成功", COLORS["accent_dark"], COLORS["accent"]
+            text = "部分数据更新成功"
         else:
-            text, bg, fg = "正在更新网络状态…", COLORS["accent_dark"], COLORS["accent"]
-        self.network_button.configure(bg=bg, fg=fg, activebackground=bg, activeforeground=fg)
-        self.network_status.configure(text=text, bg=bg, fg=fg)
+            text = "正在更新网络状态…"
+        self.network_state = connected
+        self._apply_network_status_palette()
+        self.network_status.configure(text=text)
         self.network_time.configure(text=time_text)
+
+    def _apply_network_status_palette(self) -> None:
+        bg, fg = NETWORK_STATUS_PALETTES.get(
+            getattr(self, "network_state", None), NETWORK_STATUS_PALETTES[None]
+        )
+        self.network_button.configure(
+            bg=bg, fg=fg, activebackground=bg, activeforeground=fg,
+            disabledforeground=fg,
+        )
+        self.network_status.configure(bg=bg, fg=fg)
 
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
         keys = (
@@ -4879,11 +5028,25 @@ class YaohengApp:
         if isinstance(page, CalculatorPage) and hasattr(self, "history_panel"):
             self.history_panel.refresh(page.model.history)
 
+    def calculator_history_changed(self) -> None:
+        page = self.pages.get("calculator")
+        if not isinstance(page, CalculatorPage):
+            return
+        page._refresh_context_lines()
+        self.settings.calculator_history = (
+            [list(item) for item in page.model.history[:self.settings.history_limit]]
+            if self.settings.retain_history else []
+        )
+        self.refresh_history()
+        # History is user data, so save it at the calculation boundary instead
+        # of waiting for a later full application exit.
+        self._persist_settings(notify=False)
+
     def clear_history(self) -> None:
         page = self.pages.get("calculator")
         if isinstance(page, CalculatorPage):
             page.model.history.clear()
-            self.refresh_history()
+            self.calculator_history_changed()
 
     def use_history_result(self, result: str) -> None:
         page = self.pages.get("calculator")
@@ -5471,6 +5634,11 @@ class YaohengApp:
         for calculator_key, page_key in self._themed_calculator_keys:
             if all_pages or page_key is None or page_key == self.current_page:
                 calculator_key.apply_theme()
+        if hasattr(self, "network_button") and hasattr(self, "network_status"):
+            self._apply_network_status_palette()
+        settings_page = self.pages.get("settings")
+        if isinstance(settings_page, SettingsPage) and (all_pages or self.current_page == "settings"):
+            settings_page._apply_api_status_style()
 
     def _apply_financial_theme(self, *, all_pages: bool = False) -> None:
         for key in ("fiat", "crypto"):
@@ -5528,10 +5696,11 @@ class YaohengApp:
                 activebackground=COLORS["nav_hover"],
                 activeforeground=COLORS["sidebar_text"],
             )
-        self.sidebar_theme_button.configure(
-            bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
-            activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
-        )
+        for button in (self.sidebar_previous_theme_button, self.sidebar_next_theme_button):
+            button.configure(
+                bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
+                activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
+            )
         settings_page = self.pages.get("settings")
         if isinstance(settings_page, SettingsPage):
             settings_page.theme_var.set(theme_label(theme, self.settings.language))

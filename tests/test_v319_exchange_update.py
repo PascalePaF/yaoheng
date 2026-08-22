@@ -297,6 +297,7 @@ class ExchangePageV319TkTests(unittest.TestCase):
                     if job:
                         app.root.after_cancel(job)
                         setattr(app, attr, None)
+                app._page_open_refresh_enabled = False
                 snapshot = ui_snapshot()
                 app.service.snapshot = snapshot
                 page = app.pages["exchange"]

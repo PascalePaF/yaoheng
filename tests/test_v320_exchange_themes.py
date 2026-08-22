@@ -229,6 +229,7 @@ class V320TkTests(unittest.TestCase):
                     if job:
                         app.root.after_cancel(job)
                         setattr(app, attr, None)
+                app._page_open_refresh_enabled = False
                 current = snapshot()
                 app.service.snapshot = current
                 app.apply_snapshot(current, False)

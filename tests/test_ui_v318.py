@@ -190,6 +190,7 @@ class FullWindowLifecycleSmokeTests(unittest.TestCase):
                     if job:
                         app.root.after_cancel(job)
                         setattr(app, attr, None)
+                app._page_open_refresh_enabled = False
 
                 snapshot = _snapshot()
                 app.service.snapshot = snapshot
@@ -220,8 +221,10 @@ class FullWindowLifecycleSmokeTests(unittest.TestCase):
                 app.root.update_idletasks()
                 self.assertFalse(exchange.visible)
                 self.assertTrue(crypto.visible)
-                self.assertIsNotNone(crypto.provider_combo)
-                self.assertIsNotNone(crypto.payment_combo)
+                self.assertEqual(crypto.exchange_mode, "market")
+                self.assertIsNone(crypto.coordinator)
+                self.assertIsNone(crypto.provider_combo)
+                self.assertIsNone(crypto.payment_combo)
 
                 app.show_page("settings")
                 app.root.update_idletasks()

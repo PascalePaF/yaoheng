@@ -134,9 +134,14 @@ class FullWindowV3211TkTests(unittest.TestCase):
                 settings_row = int(app.nav_buttons["settings"].grid_info()["row"])
                 theme_row = int(app.sidebar_theme_button.grid_info()["row"])
                 self.assertGreater(theme_row, settings_row)
+                self.assertEqual(int(app.sidebar_previous_theme_button.grid_info()["column"]), 0)
+                self.assertEqual(int(app.sidebar_next_theme_button.grid_info()["column"]), 1)
+                self.assertEqual(app.sidebar_previous_theme_button.cget("text"), "上一主题")
+                self.assertEqual(app.sidebar_next_theme_button.cget("text"), "下一主题")
+                self.assertNotIn("◐", app.sidebar_next_theme_button.cget("text"))
 
                 app._responsive_window_changed(SimpleNamespace(widget=app.root, width=1000))
-                self.assertEqual(int(app.sidebar.cget("width")), 76)
+                self.assertEqual(int(app.sidebar.cget("width")), 136)
                 app._responsive_window_changed(SimpleNamespace(widget=app.root, width=1400))
                 self.assertEqual(int(app.sidebar.cget("width")), 216)
 
