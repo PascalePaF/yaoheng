@@ -17,15 +17,16 @@ class ThemeCatalogV321Tests(unittest.TestCase):
                 self.assertTrue(source)
                 self.assertTrue(url.startswith("https://"))
 
-    def test_gallery_palettes_are_visually_distinct_but_restrained(self):
+    def test_gallery_palettes_are_visually_distinct_and_context_readable(self):
         self.assertGreaterEqual(len({palette["bg"] for palette in THEMES.values()}), 20)
         self.assertGreaterEqual(len({palette["accent"] for palette in THEMES.values()}), 20)
         for name, palette in THEMES.items():
             with self.subTest(theme=name):
-                for role in ("accent", "up", "down"):
-                    channels = [int(palette[role][index:index + 2], 16) for index in (1, 3, 5)]
-                    self.assertLessEqual(max(channels), 0xD8)
-                    self.assertLessEqual(max(channels) - min(channels), 96)
+                self.assertIn(palette["text"], {"#111111", "#FFFFFF"})
+                from theme_catalog import contrast_ratio
+                self.assertGreaterEqual(contrast_ratio(palette["text"], palette["card"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["on_accent"], palette["accent"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["selection_text"], palette["selection"]), 4.5)
 
 
 class ThemePalettePickerTkTests(unittest.TestCase):

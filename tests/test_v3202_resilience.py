@@ -14,7 +14,7 @@ import requests
 
 from app_ui import SettingsPage, YaohengApp
 from single_instance import INSTANCE_NAME, SingleInstance, resolve_instance_name
-from theme_catalog import THEMES, THEME_LABELS
+from theme_catalog import THEMES, THEME_LABELS, contrast_ratio
 from update_service import (
     GitHubUpdateService,
     LATEST_RELEASE_API,
@@ -331,30 +331,32 @@ class CloseBehaviorTests(unittest.TestCase):
         self.assertIn("彻底退出", SettingsPage.CLOSE_LABELS["exit"])
 
 
-class DarkThemePolicyTests(unittest.TestCase):
-    def test_all_large_surfaces_are_dark_and_low_chroma(self):
+class ThemeReadabilityPolicyTests(unittest.TestCase):
+    def test_catalog_includes_light_and_dark_surfaces_with_explicit_text_mode(self):
+        text_modes = {palette["text"] for palette in THEMES.values()}
+        self.assertEqual(text_modes, {"#111111", "#FFFFFF"})
         for name, palette in THEMES.items():
             with self.subTest(theme=name):
-                for role in ("bg", "sidebar", "card", "card_alt"):
-                    channels = [int(palette[role][index:index + 2], 16) for index in (1, 3, 5)]
-                    # V3.21 permits recognisable blue/green/brown surfaces from
-                    # established palettes while keeping every large area dark.
-                    self.assertLessEqual(max(channels), 0x5A)
-                    self.assertLessEqual(max(channels) - min(channels), 60)
+                self.assertGreaterEqual(contrast_ratio(palette["text"], palette["bg"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["text"], palette["card"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["sidebar_text"], palette["sidebar"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["input_text"], palette["input_bg"]), 4.5)
 
-    def test_accents_and_market_colours_are_restrained(self):
+    def test_contextual_controls_and_market_colours_remain_readable(self):
         for name, palette in THEMES.items():
             with self.subTest(theme=name):
-                for role in ("accent", "up", "down"):
-                    channels = [int(palette[role][index:index + 2], 16) for index in (1, 3, 5)]
-                    self.assertLessEqual(max(channels), 0xD8)
-                    self.assertLessEqual(max(channels) - min(channels), 96)
+                self.assertGreaterEqual(contrast_ratio(palette["on_accent"], palette["accent"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["calc_number_text"], palette["calc_number_bg"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["calc_function_text"], palette["calc_function_bg"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["calc_operator_text"], palette["calc_operator_bg"]), 4.5)
+                self.assertGreaterEqual(contrast_ratio(palette["up"], palette["card"]), 3.0)
+                self.assertGreaterEqual(contrast_ratio(palette["down"], palette["card"]), 3.0)
 
-    def test_visible_names_no_longer_advertise_light_themes(self):
+    def test_every_visible_name_is_new_and_nonempty(self):
         self.assertEqual(set(THEMES), set(THEME_LABELS))
         for label in THEME_LABELS.values():
-            self.assertNotIn("浅色", label)
-            self.assertNotIn("昼", label)
+            self.assertTrue(label.strip())
+            self.assertNotIn("Catppuccin", label)
 
 
 if __name__ == "__main__":

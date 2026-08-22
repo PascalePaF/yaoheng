@@ -17,7 +17,7 @@
 
 ## 简介
 
-曜衡 3.21.0 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持容错检查官方 GitHub Release 和覆盖升级。
+曜衡 3.21.1 把苹果式日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个可随窗口自适应的桌面应用中，并支持四种界面语言、容错检查官方 GitHub Release 和覆盖升级。
 
 应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-3.21.0-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
-| 绿色免安装版 | `Yaoheng-3.21.0-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| Windows 安装版（推荐） | `Yaoheng-3.21.1-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-3.21.1-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
 | 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
 系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
@@ -36,15 +36,15 @@
 > 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.0-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.0-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.1-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.1-Windows-x64-Portable.zip"
 ```
 
 ## 功能
 
 | 模块 | 主要能力 |
 | --- | --- |
-| 计算器 | 标准/专业模式、键盘公式、隐式乘法、科学计数法、DEG/RAD、历史与多种复制格式 |
+| 计算器 | 苹果式四列布局与双宽零键；进入页面即可用主键盘/数字键盘输入，支持标准/专业模式、公式预览、DEG/RAD、历史与多种复制格式 |
 | C2C 兑换 | 主币独占首行、其余六币三列两行；七栏均可输入，按实际金额查询法币/虚拟币 C2C，虚拟币之间经所选法币双段换算 |
 | 市场兑换 | 与 C2C 完全分开的七栏普通换算页，使用公开现货/市场行情和法币参考汇率，不冒充可执行购买价 |
 | 货币换算 | 全球法币 A/B/C 三端联动、任意端输入、搜索、收藏、置顶、地区与 24h 涨跌 |
@@ -52,22 +52,26 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.0-Windows-x64-Portable.zip"
 | 行情趋势 | 法币/虚拟币整表、计价币、参考数额、搜索排序及 1/7/30/90 日趋势 |
 | 本机 API | 默认关闭，仅 `127.0.0.1`；计算、换算、命令和能力查询，为未来机器人接入预留 |
 | 软件更新 | 有限重试官方 GitHub Release 请求，校验附件大小和 SHA-256 后启动覆盖升级；代理错误信息自动脱敏 |
-| 外观主题 | 28 套有来源的深色适配主题；可收展色块画廊与顺序切换按钮，即时换色且保持相同布局和字号 |
+| 多语言 | 中文简体（默认）、中文繁体、英语、日语；不重启即时切换，时区可继续用中文城市/地区关键词搜索 |
+| 外观主题 | 28 套全新深浅配色；每套扩展到 50 余项语义颜色并明确使用白色或黑色正文，可收展色块画廊并从侧栏顺序切换 |
+| 响应式界面 | 侧栏、七币卡片、三端参考区、行情面板和设置卡片会随窗口宽度自动收缩、换列或上下重排 |
 | 可靠性 | Windows 单实例与重复启动唤醒、可选关闭行为、十进制换算、响应校验、原子缓存/设置和旧结果隔离 |
 
 ## 主题与配色
 
-设置页的外观区域默认收回，只显示当前主题的五段矩形色块和名称；展开后，每一套主题都单独显示“背景、卡片、强调色、上涨色、下跌色”预览，点击即可即时切换。设置页最下方另有“切换下一个主题”按钮，可按画廊顺序逐套比较。旧版本保存的主题内部标识保持不变，覆盖升级不会重置选择。
+设置页的外观区域默认收回，只显示当前主题的五段矩形色块和名称；展开后，每一套主题都单独显示“背景、卡片、按钮、强调色、文字色”预览、配色来源及白/黑文字模式，点击即可即时切换。侧栏“设置”按钮下方另有“下一主题”按钮，可按画廊顺序逐套比较。旧版本保存的主题内部标识保持不变，覆盖升级不会重置选择。
 
-V3.21.0 的配色以长期使用的深色层次为前提，参考以下公开调色板，并针对曜衡的窗口、表格和金融涨跌色降低大面积亮度与强调色刺激度；它们是曜衡适配方案，不是各项目的官方移植版：
+V3.21.1 完全淘汰上一版可见配色，不再限定为低饱和深色。新方案通过专门配色工具选择深色、浅色、粉彩、暖色和鲜明主题，再针对导航、窗口、卡片、输入框、按钮、选择区、计算器数字/功能/运算键以及金融图表分别派生语义颜色；每套正文明确选择纯白或近黑，并以 WCAG 对比度回归测试保证文字不被主题抢走。它们是曜衡适配方案，不是配色网站的官方主题：
 
-- [Catppuccin Palette](https://catppuccin.com/palette/)
-- [Nord](https://www.nordtheme.com/)
-- [Everforest Palette](https://github.com/sainnhe/everforest/blob/master/palette.md)
-- [Rosé Pine Palette](https://rosepinetheme.com/palette/)
-- [Tokyo Night](https://github.com/tokyo-night/tokyo-night-vscode-theme)
-- [Gruvbox](https://github.com/morhetz/gruvbox)
-- [Solarized](https://ethanschoonover.com/solarized/)
+- [Coolors](https://coolors.co/)
+- [Color Hunt](https://colorhunt.co/?locale=en)
+- [Huemint](https://huemint.com/about/)
+
+## 界面语言与时区
+
+设置页“程序语言与刷新时区”可在中文简体、中文繁体、English、日本語之间即时切换；默认语言为中文简体。导航、计算器、兑换控件、行情、设置、动态状态、提示框、主题名称与常用币种名称会同步更新，不需要重启，币种代码、算式、平台标识和已保存设置不会因翻译改变。
+
+时区候选项按当前界面语言显示，但搜索索引始终保留中文国家/地区、城市和常见别名。因此即使界面已经切换到英语或日语，输入“北京”“纽约”“东京”等中文词仍可找到对应 IANA 时区。
 
 ## 七币种兑换
 
@@ -170,14 +174,14 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
 - `release\曜衡\曜衡.exe`
-- `release\Yaoheng-3.21.0-Windows-x64-Portable.zip`
-- `release\Yaoheng-3.21.0-Windows-x64-Setup.exe`
+- `release\Yaoheng-3.21.1-Windows-x64-Portable.zip`
+- `release\Yaoheng-3.21.1-Windows-x64-Setup.exe`
 - `release\SHA256SUMS.txt`
 
 发布前可在随机系统临时目录复验覆盖升级、用户数据保留和打包后单实例；测试使用独立安装身份，不会改动真实曜衡安装：
 
 ```powershell
-.\tools\smoke_upgrade.ps1 -PreviousVersion 3.20.2
+.\tools\smoke_upgrade.ps1 -PreviousVersion 3.21.0
 ```
 
 ## 项目结构

@@ -23,6 +23,7 @@ from conversion_core import (
     canonical_rate_string,
     normalize_currency_code,
 )
+from localization import normalize_language
 from rate_service import portable_dir
 from theme_catalog import SUPPORTED_THEME_NAMES
 
@@ -164,6 +165,7 @@ class AppSettings:
     # The original 3.17 fields deliberately remain top-level for UI and import
     # compatibility.  The v2 page partitions are additive, not a replacement.
     theme: str = "dark"
+    language: str = "zh_CN"
     timezone: str = "Asia/Tokyo"
     data_dir: str = ""
     keep_data_with_app: bool = True
@@ -819,6 +821,7 @@ class SettingsStore:
         zone_names = set(_cached_timezone_names())
         if not isinstance(settings.theme, str) or settings.theme not in SUPPORTED_THEME_NAMES:
             settings.theme = defaults.theme
+        settings.language = normalize_language(settings.language)
         if not isinstance(settings.timezone, str) or settings.timezone not in zone_names:
             settings.timezone = defaults.timezone
         settings.fiat_refresh_minutes = _clamp_int(

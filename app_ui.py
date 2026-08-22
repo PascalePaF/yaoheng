@@ -26,7 +26,6 @@ from command_service import CommandService
 from exchange_page import (
     PAYMENT_ALL_LABEL,
     PAYMENT_UNKNOWN_LABEL,
-    PROVIDER_BY_LABEL,
     PROVIDER_LABELS,
     C2CBridgeJob,
     C2CQuoteJob,
@@ -36,12 +35,27 @@ from exchange_page import (
     ExchangePageState,
 )
 from local_api import LocalAPIError, LocalAPIPortInUseError, LocalAPIServer
+from localization import (
+    LANGUAGE_LABELS,
+    format_datetime,
+    get_language,
+    install_tk_localization,
+    localized_asset_name,
+    normalize_language,
+    refresh_widget_tree,
+    set_language as set_ui_language,
+    timezone_display_name,
+    timezone_search_text,
+    tr,
+)
 from rate_service import RateService, RateSnapshot, crypto_display_name, fiat_display_name, fiat_region, portable_dir, relative_rate_change
 from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
-from theme_catalog import THEME_LABELS, THEME_SOURCES, THEMES
+from theme_catalog import THEME_LABELS, THEME_SOURCES, THEMES, theme_label
 from update_service import DownloadedUpdate, GitHubUpdateService, UpdateError, UpdateInfo
 
+
+DisplayStringVar = install_tk_localization(tk, ttk, messagebox, filedialog)
 
 COLORS = dict(THEMES["dark"])
 
@@ -113,12 +127,9 @@ def register_windows_restart() -> bool:
 
 
 def format_chinese_datetime(value: datetime) -> str:
-    """Format a timestamp without passing CJK text through the OS locale codec."""
+    """Backward-compatible locale-aware timestamp formatter."""
 
-    return (
-        f"{value.year:04d}年{value.month:02d}月{value.day:02d}日 "
-        f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
-    )
+    return format_datetime(value)
 
 
 def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
@@ -352,12 +363,13 @@ class AppButton(tk.Button):
         **kwargs,
     ) -> None:
         palettes = {
-            "normal": (COLORS["key"], COLORS["text"], COLORS["key_hover"]),
-            "muted": (COLORS["muted_key"], COLORS["text"], COLORS["key_hover"]),
+            "normal": (COLORS["button_bg"], COLORS["button_text"], COLORS["button_hover"]),
+            "muted": (COLORS["calc_function_bg"], COLORS["calc_function_text"], COLORS["calc_function_hover"]),
             "accent": (COLORS["accent"], COLORS["on_accent"], COLORS["accent_hover"]),
             "outline": (COLORS["card"], COLORS["accent"], COLORS["accent_dark"]),
             "soft_accent": (COLORS["accent_dark"], COLORS["accent"], COLORS["card_alt"]),
             "ghost": (COLORS["card"], COLORS["muted"], COLORS["card_alt"]),
+            "operator": (COLORS["calc_operator_bg"], COLORS["calc_operator_text"], COLORS["calc_operator_hover"]),
         }
         bg, fg, active = palettes[kind]
         outline_width = 1 if kind == "outline" else 0
@@ -376,7 +388,7 @@ class AppButton(tk.Button):
             highlightbackground=COLORS["accent"] if outline_width else bg,
             highlightcolor=COLORS["accent"] if outline_width else bg,
             cursor="hand2",
-            font=(FONT, size, "bold" if kind in {"accent", "outline", "soft_accent"} else "normal"),
+            font=(FONT, size, "bold" if kind in {"accent", "outline", "soft_accent", "operator"} else "normal"),
             **kwargs,
         )
 
@@ -395,6 +407,7 @@ class SearchSelect(tk.Frame):
         width: int = 20,
         font_size: int = 10,
         max_rows: int = 8,
+        search_aliases: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(
             master, bg=COLORS["card_alt"], bd=0, highlightthickness=1,
@@ -407,6 +420,7 @@ class SearchSelect(tk.Frame):
         self.input_callback = input_callback
         self.allow_free_text = allow_free_text
         self.max_rows = max_rows
+        self.search_aliases = dict(search_aliases or {})
         self.selected_value = variable.get()
         self.popup: tk.Toplevel | None = None
         self.listbox: tk.Listbox | None = None
@@ -460,8 +474,10 @@ class SearchSelect(tk.Frame):
             if self.command:
                 self.command(value)
 
-    def set_values(self, values: list[str]) -> None:
+    def set_values(self, values: list[str], search_aliases: Mapping[str, str] | None = None) -> None:
         updated = list(values)
+        if search_aliases is not None:
+            self.search_aliases = dict(search_aliases)
         if updated == self.values:
             return
         self.values = updated
@@ -592,7 +608,11 @@ class SearchSelect(tk.Frame):
 
     def _filter(self, query: str) -> None:
         needle = query.strip().casefold()
-        self.filtered_values = self.values if not needle else [value for value in self.values if needle in value.casefold()]
+        self.filtered_values = self.values if not needle else [
+            value
+            for value in self.values
+            if needle in f"{value} {self.search_aliases.get(value, '')}".casefold()
+        ]
         exact = self.variable.get()
         self.active_index = self.filtered_values.index(exact) if exact in self.filtered_values else 0
 
@@ -792,7 +812,7 @@ class SearchSelect(tk.Frame):
 class ThemePalettePicker(tk.Frame):
     """Collapsible, keyboard-accessible theme gallery with real palette swatches."""
 
-    SWATCH_ROLES = ("bg", "card", "accent", "up", "down")
+    SWATCH_ROLES = ("bg", "card", "button_bg", "accent", "text")
 
     def __init__(
         self,
@@ -900,7 +920,7 @@ class ThemePalettePicker(tk.Frame):
             swatch.grid(row=0, column=0, rowspan=2, sticky="w", padx=(9, 11), pady=8)
             label = tk.Label(
                 row,
-                text=THEME_LABELS[name],
+                text=theme_label(name, get_language()),
                 bg=COLORS["card_alt"],
                 fg=COLORS["text"],
                 font=(FONT, 9, "bold"),
@@ -910,7 +930,7 @@ class ThemePalettePicker(tk.Frame):
             label.grid(row=0, column=1, sticky="sew", pady=(6, 0))
             source = tk.Label(
                 row,
-                text=f"参考 {THEME_SOURCES[name][0]} 官方配色",
+                text=self._source_text(name),
                 bg=COLORS["card_alt"],
                 fg=COLORS["muted"],
                 font=(FONT, 7),
@@ -987,13 +1007,24 @@ class ThemePalettePicker(tk.Frame):
         marker.configure(bg=background)
 
     def _update_header(self) -> None:
-        source_name = THEME_SOURCES[self.theme][0]
-        self.header_name.configure(text=THEME_LABELS[self.theme])
-        self.header_source.configure(text=f"参考 {source_name} 官方配色 · 已针对曜衡深色界面降低刺激度")
+        self.header_name.configure(text=theme_label(self.theme, get_language()))
+        self.header_source.configure(text=self._source_text(self.theme))
         self.toggle_button.configure(
-            text="收回主题列表  ▴" if self.expanded else f"展开全部 {len(THEMES)} 套  ▾"
+            text=tr("收回主题列表  ▴") if self.expanded else tr(f"展开全部 {len(THEMES)} 套  ▾")
         )
         self._draw_swatch(self.header_swatch, THEMES[self.theme])
+
+    @staticmethod
+    def _source_text(theme: str) -> str:
+        source_name = THEME_SOURCES[theme][0]
+        text_mode = "白色文字" if THEMES[theme]["text"] == "#FFFFFF" else "黑色文字"
+        return f"{tr('配色参考')} · {source_name} · {tr(text_mode)}"
+
+    def apply_language(self) -> None:
+        for name, (_row, _swatch, label, source, _marker) in self.rows.items():
+            label.configure(text=theme_label(name, get_language()))
+            source.configure(text=self._source_text(name))
+        self._update_header()
 
     def apply_theme(self) -> None:
         self.configure(bg=COLORS["card"], highlightbackground=COLORS["line"])
@@ -1085,15 +1116,93 @@ class TreeSelectionBorder:
                 self.idle_job = None
 
 
+class CalculatorKey(tk.Canvas):
+    """Rounded, responsive calculator key with keyboard and hover feedback."""
+
+    def __init__(self, master: tk.Misc, label: str, command: Callable[[], None], kind: str = "number") -> None:
+        super().__init__(master, bg=COLORS["calculator_bg"], bd=0, highlightthickness=0, takefocus=True, cursor="hand2")
+        self.label = label
+        self.command = command
+        self.kind = kind
+        self.hovered = False
+        self.pressed = False
+        self.bind("<Configure>", self._redraw, add="+")
+        self.bind("<Enter>", lambda _event: self._set_hover(True), add="+")
+        self.bind("<Leave>", lambda _event: self._set_hover(False), add="+")
+        self.bind("<ButtonPress-1>", self._press, add="+")
+        self.bind("<ButtonRelease-1>", self._release, add="+")
+        self.bind("<Return>", lambda _event: self._invoke(), add="+")
+        self.bind("<space>", lambda _event: self._invoke(), add="+")
+        self.bind("<FocusIn>", self._redraw, add="+")
+        self.bind("<FocusOut>", self._redraw, add="+")
+
+    def _palette(self) -> tuple[str, str, str]:
+        if self.kind == "operator":
+            return COLORS["calc_operator_bg"], COLORS["calc_operator_text"], COLORS["calc_operator_hover"]
+        if self.kind == "function":
+            return COLORS["calc_function_bg"], COLORS["calc_function_text"], COLORS["calc_function_hover"]
+        return COLORS["calc_number_bg"], COLORS["calc_number_text"], COLORS["calc_number_hover"]
+
+    def _set_hover(self, value: bool) -> None:
+        self.hovered = value
+        self._redraw()
+
+    def _press(self, _event: tk.Event) -> None:
+        self.pressed = True
+        self.focus_set()
+        self._redraw()
+
+    def _release(self, event: tk.Event) -> None:
+        was_pressed = self.pressed
+        self.pressed = False
+        self._redraw()
+        if was_pressed and 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
+            self.command()
+
+    def _invoke(self) -> str:
+        self.command()
+        return "break"
+
+    def _redraw(self, _event: tk.Event | None = None) -> None:
+        try:
+            width = max(2, self.winfo_width())
+            height = max(2, self.winfo_height())
+        except tk.TclError:
+            return
+        background, foreground, hover = self._palette()
+        fill = hover if self.hovered or self.pressed else background
+        self.configure(bg=COLORS["calculator_bg"])
+        self.delete("all")
+        margin = 3
+        radius = max(8, min((height - margin * 2) / 2, 28))
+        left, top, right, bottom = margin, margin, width - margin, height - margin
+        points = (
+            left + radius, top, right - radius, top, right, top,
+            right, top + radius, right, bottom - radius, right, bottom,
+            right - radius, bottom, left + radius, bottom, left, bottom,
+            left, bottom - radius, left, top + radius, left, top,
+        )
+        focused = self.focus_get() is self
+        self.create_polygon(points, smooth=True, splinesteps=24, fill=fill, outline=COLORS["focus"] if focused else fill, width=2 if focused else 1)
+        font_size = max(12, min(19, int(height * 0.29)))
+        self.create_text(width / 2, height / 2, text=tr(self.label), fill=foreground, font=("Segoe UI", font_size, "bold" if self.kind != "number" else "normal"))
+
+    def apply_theme(self) -> None:
+        self._redraw()
+
+    def apply_language(self) -> None:
+        self._redraw()
+
+
 class CalculatorPage(tk.Frame):
-    """4x5 keypad that animates into a compact professional layout."""
+    """Apple-inspired keypad with direct formula editing and live preview."""
 
     STANDARD_KEYS = [
-        ["AC", "←", "%", "÷"],
-        ["7", "8", "9", "×"],
-        ["4", "5", "6", "−"],
-        ["1", "2", "3", "+"],
-        ["专业", "0", ".", "="],
+        [("AC", 1), ("±", 1), ("%", 1), ("÷", 1)],
+        [("7", 1), ("8", 1), ("9", 1), ("×", 1)],
+        [("4", 1), ("5", 1), ("6", 1), ("−", 1)],
+        [("1", 1), ("2", 1), ("3", 1), ("+", 1)],
+        [("0", 2), (".", 1), ("=", 1)],
     ]
     PRO_KEYS = [
         ["(", ")", "lg", "ln"],
@@ -1126,9 +1235,10 @@ class CalculatorPage(tk.Frame):
         self.professional = initial_professional
         self.animating = False
         self.expression_var = tk.StringVar(value="0")
-        self.result_var = tk.StringVar(value="0")
-        self.mode_var = tk.StringVar(value="标准模式 · 4 × 5 键盘 · 可直接输入公式")
+        self.result_var = DisplayStringVar(value="0")
+        self.mode_var = DisplayStringVar(value="标准模式 · 苹果式键盘 · 直接输入公式")
         self._updating_expression = False
+        self.keys: list[CalculatorKey] = []
         self.after_jobs = TkAfterJobs(self)
         self._build()
         self.bind("<Destroy>", self._destroy_jobs, add="+")
@@ -1143,25 +1253,31 @@ class CalculatorPage(tk.Frame):
         header.grid_columnconfigure(0, weight=1)
         tk.Label(header, text="计算器", bg=COLORS["bg"], fg=COLORS["text"], font=(FONT, 24, "bold")).grid(row=0, column=0, sticky="w")
         tk.Label(header, textvariable=self.mode_var, bg=COLORS["bg"], fg=COLORS["muted"], font=(FONT, 10)).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.mode_button = AppButton(header, "专业", self.toggle_mode, "muted", 9)
+        self.mode_button.grid(row=0, column=1, rowspan=2, padx=(0, 8), ipadx=9, ipady=7)
         self.copy_button = AppButton(header, "复制结果", self.copy_current_result, "ghost", 9)
-        self.copy_button.grid(row=0, column=1, rowspan=2, padx=(0, 8), ipadx=8, ipady=7)
+        self.copy_button.grid(row=0, column=2, rowspan=2, padx=(0, 8), ipadx=8, ipady=7)
         self.history_button = AppButton(header, "打开历史记录", self.history_callback, "outline", 10)
-        self.history_button.grid(row=0, column=2, rowspan=2, ipadx=10, ipady=7)
+        self.history_button.grid(row=0, column=3, rowspan=2, ipadx=10, ipady=7)
 
-        stage = tk.Frame(self, bg=COLORS["bg"])
-        stage.grid(row=1, column=0, sticky="nsew", padx=34, pady=(0, 28))
-        stage.grid_columnconfigure(0, weight=1)
-        stage.grid_rowconfigure(1, weight=1)
-        display = tk.Frame(stage, bg=COLORS["card"], height=150)
+        self.stage_host = tk.Frame(self, bg=COLORS["calculator_bg"])
+        self.stage_host.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 24))
+        self.stage_host.bind("<Configure>", self._resize_stage, add="+")
+        self.stage = tk.Frame(self.stage_host, bg=COLORS["calculator_bg"])
+        self.stage.place(relx=0.5, rely=0, anchor="n", relheight=1.0, width=520)
+        self.stage.grid_columnconfigure(0, weight=1)
+        self.stage.grid_rowconfigure(1, weight=1)
+        display = tk.Frame(self.stage, bg=COLORS["display_bg"], height=150)
         display.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         display.grid_propagate(False)
         display.grid_columnconfigure(0, weight=1)
+        self.display_frame = display
         self.expression_entry = tk.Entry(
-            display, textvariable=self.expression_var, bg=COLORS["card"], fg=COLORS["muted"],
-            insertbackground=COLORS["text"], insertwidth=2,
+            display, textvariable=self.expression_var, bg=COLORS["display_bg"], fg=COLORS["display_expression"],
+            insertbackground=COLORS["display_text"], insertwidth=2,
             selectbackground=COLORS["selection"], selectforeground=COLORS["selection_text"],
             font=("Segoe UI", 18), justify="right", relief="flat", bd=0,
-            highlightthickness=0,
+            highlightthickness=0, takefocus=True,
         )
         self.expression_entry.grid(row=0, column=0, sticky="ew", padx=26, pady=(23, 0))
         self.expression_entry.bind("<FocusIn>", self._expression_focus_in)
@@ -1169,35 +1285,44 @@ class CalculatorPage(tk.Frame):
         self.expression_entry.bind("<Return>", self._evaluate_manual_expression)
         self.expression_entry.bind("<KP_Enter>", self._evaluate_manual_expression)
         self.expression_var.trace_add("write", self._manual_expression_changed)
-        tk.Label(display, textvariable=self.result_var, bg=COLORS["card"], fg=COLORS["text"], font=("Segoe UI", 39, "bold"), anchor="e", padx=24).grid(row=1, column=0, sticky="ew", pady=(2, 18))
+        self.result_label = tk.Label(display, textvariable=self.result_var, bg=COLORS["display_bg"], fg=COLORS["display_text"], font=("Segoe UI", 40), anchor="e", padx=24)
+        self.result_label.grid(row=1, column=0, sticky="ew", pady=(2, 18))
+        display.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
+        self.result_label.bind("<Button-1>", lambda _event: self.activate_keyboard(), add="+")
 
-        self.keypad_area = tk.Frame(stage, bg=COLORS["bg"])
+        self.keypad_area = tk.Frame(self.stage, bg=COLORS["calculator_bg"])
         self.keypad_area.grid(row=1, column=0, sticky="nsew")
-        self.standard_frame = tk.Frame(self.keypad_area, bg=COLORS["bg"])
-        self.pro_frame = tk.Frame(self.keypad_area, bg=COLORS["bg"])
+        self.standard_frame = tk.Frame(self.keypad_area, bg=COLORS["calculator_bg"])
+        self.pro_frame = tk.Frame(self.keypad_area, bg=COLORS["calculator_bg"])
         self._build_key_frame(self.standard_frame, self.STANDARD_KEYS, professional=False)
         self._build_key_frame(self.pro_frame, self.PRO_KEYS, professional=True)
         self.standard_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-    def _build_key_frame(self, frame: tk.Frame, rows: list[list[str]], professional: bool) -> None:
+    def _build_key_frame(self, frame: tk.Frame, rows: list, professional: bool) -> None:
         for column in range(4):
             frame.grid_columnconfigure(column, weight=1, uniform="calc")
         for row in range(len(rows)):
             frame.grid_rowconfigure(row, weight=1, uniform="calc")
         for row, values in enumerate(rows):
-            for column, label in enumerate(values):
-                if label == "=":
-                    kind = "accent"
-                elif label in {"÷", "×", "−", "+"}:
-                    kind = "outline"
-                elif professional or label in {"AC", "←", "%", "专业"}:
-                    kind = "muted"
+            column = 0
+            for item in values:
+                label, span = item if isinstance(item, tuple) else (item, 1)
+                if label in {"÷", "×", "−", "+", "="}:
+                    kind = "operator"
+                elif professional or label in {"AC", "±", "%", "←"}:
+                    kind = "function"
                 else:
-                    kind = "normal"
-                button = AppButton(frame, label, lambda key=label: self.handle(key), kind, 13 if professional else 14)
-                button.grid(row=row, column=column, sticky="nsew", padx=5, pady=5)
-                if label == "专业":
-                    self.mode_button = button
+                    kind = "number"
+                button = CalculatorKey(frame, label, lambda key=label: self.handle(key), kind)
+                button.grid(row=row, column=column, columnspan=span, sticky="nsew", padx=4, pady=4)
+                self.keys.append(button)
+                column += span
+
+    def _resize_stage(self, event: tk.Event) -> None:
+        available = max(320, int(event.width) - 8)
+        maximum = 720 if self.professional else 540
+        self.stage.place_configure(width=max(340, min(maximum, available)))
+        self.display_frame.configure(height=max(118, min(180, int(event.height * 0.24))))
 
     def set_history_open(self, is_open: bool) -> None:
         self.history_button.configure(text="关闭历史记录" if is_open else "打开历史记录")
@@ -1212,7 +1337,11 @@ class CalculatorPage(tk.Frame):
             self.pro_frame.place_forget()
             self.standard_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.mode_button.configure(text="标准" if professional else "专业")
-        self.mode_var.set("专业模式 · 动态科学键盘 · 可直接输入公式" if professional else "标准模式 · 4 × 5 键盘 · 可直接输入公式")
+        self.mode_var.set("专业模式 · 科学键盘 · 直接输入公式" if professional else "标准模式 · 苹果式键盘 · 直接输入公式")
+        try:
+            self.stage.place_configure(width=720 if professional else 520)
+        except (AttributeError, tk.TclError):
+            pass
 
     def apply_calculator_settings(self, angle_mode: str, history_limit: int, copy_format: str) -> None:
         self.model.angle_mode = angle_mode if angle_mode in {"DEG", "RAD"} else "DEG"
@@ -1264,7 +1393,7 @@ class CalculatorPage(tk.Frame):
             self.professional = target_professional
             self.animating = False
             self.mode_button.configure(text="标准" if self.professional else "专业")
-            self.mode_var.set("专业模式 · 动态科学键盘 · 可直接输入公式" if self.professional else "标准模式 · 4 × 5 键盘 · 可直接输入公式")
+            self.mode_var.set("专业模式 · 科学键盘 · 直接输入公式" if self.professional else "标准模式 · 苹果式键盘 · 直接输入公式")
             self.mode_changed("professional" if self.professional else "standard")
             if not self.professional:
                 self.pro_frame.place_forget()
@@ -1367,17 +1496,20 @@ class CalculatorPage(tk.Frame):
         self.result_var.set(self.model.preview() or "0")
 
     def on_show(self) -> None:
-        try:
-            self.after_idle(self._focus_expression)
-        except tk.TclError:
-            pass
+        self.after_jobs.schedule(0, self.activate_keyboard, idle=True)
+        self.after_jobs.schedule(80, self.activate_keyboard)
 
-    def _focus_expression(self) -> None:
+    def activate_keyboard(self) -> None:
         try:
-            self.expression_entry.focus_set()
+            self.expression_entry.focus_force()
             self.expression_entry.icursor(tk.END)
         except tk.TclError:
             pass
+
+    def apply_language(self) -> None:
+        self.set_mode_immediate(self.professional)
+        for key in self.keys:
+            key.apply_language()
 
     def _destroy_jobs(self, event: tk.Event) -> None:
         if event.widget is self:
@@ -1441,10 +1573,10 @@ class DualConverterPage(tk.Frame):
             if mode == "fiat" else
             "法币与虚拟币可自由组合为 A/B/C 三端；金额框可直接输入基础算式。"
         )
-        self.status_var = tk.StringVar(value=meaningful)
-        self.refresh_stamp_var = tk.StringVar(value="最新刷新：等待联网")
+        self.status_var = DisplayStringVar(value=meaningful)
+        self.refresh_stamp_var = DisplayStringVar(value="最新刷新：等待联网")
         self.search_var = tk.StringVar()
-        self.rate_var = tk.StringVar(value="在任意一端输入金额或算式，按回车、= 或点击输入框外完成计算与换算")
+        self.rate_var = DisplayStringVar(value="在任意一端输入金额或算式，按回车、= 或点击输入框外完成计算与换算")
         restored_side = str(restored.get("active_side", "a")).lower()
         self.active_side = restored_side if restored_side in {"a", "b", "c"} else "a"
         restored_exchange_mode = str(restored.get("mode", "market")).lower()
@@ -1453,10 +1585,10 @@ class DualConverterPage(tk.Frame):
         self.c2c_provider = restored_provider if restored_provider in PROVIDER_LABELS else "auto"
         restored_payment = str(restored.get("payment_method", ""))
         self.c2c_payment_method = restored_payment if len(restored_payment) <= 64 else ""
-        self.mode_var = tk.StringVar(value="C2C 按金额" if self.exchange_mode == "c2c" else "普通汇率")
-        self.provider_var = tk.StringVar(value=PROVIDER_LABELS[self.c2c_provider])
-        self.payment_var = tk.StringVar(value=PAYMENT_ALL_LABEL)
-        self.payment_by_label: dict[str, str] = {PAYMENT_ALL_LABEL: ""}
+        self.mode_var = tk.StringVar(value=tr("C2C 按金额" if self.exchange_mode == "c2c" else "普通汇率"))
+        self.provider_var = tk.StringVar(value=tr(PROVIDER_LABELS[self.c2c_provider]))
+        self.payment_var = tk.StringVar(value=tr(PAYMENT_ALL_LABEL))
+        self.payment_by_label: dict[str, str] = {tr(PAYMENT_ALL_LABEL): ""}
         self.payment_cache: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
         self.payment_request: tuple[str, str, int] | None = None
         self.conversion_generation = 0
@@ -1513,26 +1645,26 @@ class DualConverterPage(tk.Frame):
             c2c_controls.grid_columnconfigure(3, weight=1)
             c2c_controls.grid_columnconfigure(5, weight=2)
             tk.Label(c2c_controls, text="换算模式", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=0, padx=(12, 6), pady=8)
-            self.mode_combo = ttk.Combobox(c2c_controls, textvariable=self.mode_var, values=("普通汇率", "C2C 按金额"), state="readonly", width=14)
+            self.mode_combo = ttk.Combobox(c2c_controls, textvariable=self.mode_var, values=(tr("普通汇率"), tr("C2C 按金额")), state="readonly", width=14)
             self.mode_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=6)
             self.mode_combo.bind("<<ComboboxSelected>>", self._crypto_mode_changed)
             tk.Label(c2c_controls, text="来源", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=2, padx=(0, 6))
-            self.provider_combo = ttk.Combobox(c2c_controls, textvariable=self.provider_var, values=tuple(PROVIDER_LABELS.values()), state="readonly", width=11)
+            self.provider_combo = ttk.Combobox(c2c_controls, textvariable=self.provider_var, values=tuple(self._provider_labels().values()), state="readonly", width=11)
             self.provider_combo.grid(row=0, column=3, sticky="ew", padx=(0, 10), pady=6)
             self.provider_combo.bind("<<ComboboxSelected>>", self._crypto_provider_changed)
             tk.Label(c2c_controls, text="支付", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).grid(row=0, column=4, padx=(0, 6))
-            self.payment_combo = ttk.Combobox(c2c_controls, textvariable=self.payment_var, values=(PAYMENT_UNKNOWN_LABEL,), state="readonly", width=24)
+            self.payment_combo = ttk.Combobox(c2c_controls, textvariable=self.payment_var, values=(tr(PAYMENT_UNKNOWN_LABEL),), state="readonly", width=24)
             self.payment_combo.grid(row=0, column=5, sticky="ew", padx=(0, 12), pady=6)
             self.payment_combo.bind("<<ComboboxSelected>>", self._crypto_payment_changed)
             self._update_crypto_control_states()
 
-        body = tk.Frame(self, bg=COLORS["bg"])
+        body = self.body = tk.Frame(self, bg=COLORS["bg"])
         body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 26))
         body.grid_columnconfigure(0, weight=5, uniform="convert")
         body.grid_columnconfigure(1, weight=7, uniform="convert")
         body.grid_rowconfigure(0, weight=1)
 
-        converter = tk.Frame(body, bg=COLORS["card"])
+        converter = self.converter_card = tk.Frame(body, bg=COLORS["card"])
         converter.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         converter.grid_columnconfigure(0, weight=1)
         tk.Label(converter, text="三端金额联动换算", bg=COLORS["card"], fg=COLORS["text"], font=(FONT, 15, "bold")).grid(row=0, column=0, sticky="w", padx=22, pady=(18, 3))
@@ -1571,7 +1703,7 @@ class DualConverterPage(tk.Frame):
         rate_box.grid(row=10, column=0, sticky="ew", padx=22, pady=(0, 16))
         tk.Label(rate_box, textvariable=self.rate_var, bg=COLORS["accent_dark"], fg=COLORS["accent"], font=(FONT, 9), wraplength=410, justify="left").pack(anchor="w", padx=14, pady=10)
 
-        list_card = tk.Frame(body, bg=COLORS["card"])
+        list_card = self.list_card = tk.Frame(body, bg=COLORS["card"])
         list_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         list_card.grid_columnconfigure(0, weight=1)
         list_card.grid_rowconfigure(2, weight=1)
@@ -1590,19 +1722,22 @@ class DualConverterPage(tk.Frame):
         )
         self.search_selector.grid(row=0, column=2, sticky="ew")
 
-        reference_row = tk.Frame(list_card, bg=COLORS["card"])
+        reference_row = self.reference_row = tk.Frame(list_card, bg=COLORS["card"])
         reference_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=22, pady=(3, 10))
         reference_row.grid_columnconfigure(2, weight=1)
-        tk.Label(reference_row, text="参考币种", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold")).grid(row=0, column=0, padx=(0, 8))
+        self.reference_base_label = tk.Label(reference_row, text="参考币种", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold"))
+        self.reference_base_label.grid(row=0, column=0, padx=(0, 8))
         self.table_base_selector = SearchSelect(
             reference_row, self.table_base_var, command=lambda _value: self.table_base_changed(),
             width=12, font_size=9, max_rows=7,
         )
         self.table_base_selector.grid(row=0, column=1, sticky="w")
-        AppButton(reference_row, "默认顺序", self.reset_table_order, "soft_accent", 8).grid(
+        self.reset_order_button = AppButton(reference_row, "默认顺序", self.reset_table_order, "soft_accent", 8)
+        self.reset_order_button.grid(
             row=0, column=3, padx=(12, 10), ipady=5,
         )
-        tk.Label(reference_row, text="参考币数额", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold")).grid(row=0, column=4, padx=(0, 8))
+        self.reference_amount_label = tk.Label(reference_row, text="参考币数额", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold"))
+        self.reference_amount_label.grid(row=0, column=4, padx=(0, 8))
         self.reference_amount_entry = tk.Entry(
             reference_row, textvariable=self.reference_amount_var, width=18,
             bg=COLORS["card_alt"], fg=COLORS["text"], insertbackground=COLORS["text"],
@@ -1655,6 +1790,59 @@ class DualConverterPage(tk.Frame):
             activebackground=COLORS["card"], activeforeground=COLORS["accent"], relief="flat", bd=0,
             highlightthickness=0, font=(FONT, 10, "bold"), cursor="hand2",
         )
+        self._reference_compact: bool | None = None
+        list_card.bind("<Configure>", self._responsive_reference_controls, add="+")
+
+    @staticmethod
+    def _provider_labels() -> dict[str, str]:
+        return {provider: tr(label) for provider, label in PROVIDER_LABELS.items()}
+
+    @classmethod
+    def _provider_code(cls, label: str) -> str:
+        return next(
+            (provider for provider, display in cls._provider_labels().items() if display == label),
+            "auto",
+        )
+
+    def apply_language(self) -> None:
+        if self.mode == "crypto":
+            self.mode_var.set(tr("C2C 按金额" if self.exchange_mode == "c2c" else "普通汇率"))
+            provider_labels = self._provider_labels()
+            self.provider_var.set(provider_labels.get(self.c2c_provider, provider_labels["auto"]))
+            if self.mode_combo is not None:
+                self.mode_combo.configure(values=(tr("普通汇率"), tr("C2C 按金额")))
+            if self.provider_combo is not None:
+                self.provider_combo.configure(values=tuple(provider_labels.values()))
+        if self.current_snapshot is not None:
+            self.apply_snapshot(
+                self.current_snapshot,
+                self.current_snapshot_from_cache,
+                animated=False,
+            )
+
+    def _responsive_reference_controls(self, event: tk.Event | None = None) -> None:
+        width = int(event.width) if event is not None else int(self.list_card.winfo_width())
+        compact = width < 560
+        if compact == self._reference_compact:
+            return
+        self._reference_compact = compact
+        for column in range(6):
+            self.reference_row.grid_columnconfigure(column, weight=0)
+        if compact:
+            self.reference_row.grid_columnconfigure(1, weight=1)
+            self.reference_row.grid_columnconfigure(4, weight=1)
+            self.reference_base_label.grid_configure(row=0, column=0, padx=(0, 8), pady=(0, 7))
+            self.table_base_selector.grid_configure(row=0, column=1, sticky="ew", pady=(0, 7))
+            self.reset_order_button.grid_configure(row=0, column=2, padx=(10, 0), pady=(0, 7))
+            self.reference_amount_label.grid_configure(row=1, column=0, padx=(0, 8))
+            self.reference_amount_entry.grid_configure(row=1, column=1, columnspan=2, sticky="ew")
+        else:
+            self.reference_row.grid_columnconfigure(2, weight=1)
+            self.reference_base_label.grid_configure(row=0, column=0, padx=(0, 8), pady=0)
+            self.table_base_selector.grid_configure(row=0, column=1, columnspan=1, sticky="w", pady=0)
+            self.reset_order_button.grid_configure(row=0, column=3, padx=(12, 10), pady=0)
+            self.reference_amount_label.grid_configure(row=0, column=4, padx=(0, 8))
+            self.reference_amount_entry.grid_configure(row=0, column=5, columnspan=1, sticky="e")
 
     def _amount_entry(self, parent: tk.Misc, label: str, variable: tk.StringVar, row: int, side: str) -> tk.Entry:
         container = tk.Frame(parent, bg=COLORS["card"])
@@ -1815,7 +2003,7 @@ class DualConverterPage(tk.Frame):
         )
 
     def _crypto_mode_changed(self, _event: tk.Event | None = None) -> None:
-        self.exchange_mode = "c2c" if self.mode_var.get() == "C2C 按金额" else "market"
+        self.exchange_mode = "c2c" if self.mode_var.get() == tr("C2C 按金额") else "market"
         self._advance_conversion_generation()
         self._update_crypto_control_states()
         self._refresh_crypto_payment_options()
@@ -1823,7 +2011,7 @@ class DualConverterPage(tk.Frame):
         self.convert_from(self.active_side)
 
     def _crypto_provider_changed(self, _event: tk.Event | None = None) -> None:
-        self.c2c_provider = PROVIDER_BY_LABEL.get(self.provider_var.get(), "auto")
+        self.c2c_provider = self._provider_code(self.provider_var.get())
         self.c2c_payment_method = ""
         self._advance_conversion_generation()
         self.crypto_payment_generation += 1
@@ -1855,16 +2043,18 @@ class DualConverterPage(tk.Frame):
         key = (self.c2c_provider, fiat)
         options = self.payment_cache.get(key, ())
         if options:
-            self.payment_by_label = {PAYMENT_ALL_LABEL: ""}
+            all_label = tr(PAYMENT_ALL_LABEL)
+            self.payment_by_label = {all_label: ""}
             for identifier, name in options:
                 self.payment_by_label[f"{name} · {identifier}"] = identifier
             selected = next(
                 (label for label, identifier in self.payment_by_label.items() if identifier == self.c2c_payment_method),
-                PAYMENT_ALL_LABEL,
+                all_label,
             )
         else:
-            self.payment_by_label = {PAYMENT_UNKNOWN_LABEL: ""}
-            selected = PAYMENT_UNKNOWN_LABEL
+            unknown_label = tr(PAYMENT_UNKNOWN_LABEL)
+            self.payment_by_label = {unknown_label: ""}
+            selected = unknown_label
         self.payment_combo.configure(values=tuple(self.payment_by_label))
         self.payment_var.set(selected)
         self._update_crypto_control_states()
@@ -2046,7 +2236,8 @@ class DualConverterPage(tk.Frame):
         self.refresh_button.configure(text="↻  刷新汇率", state="normal")
 
     def _register_currency(self, code: str, snapshot: RateSnapshot, crypto: bool) -> str:
-        name = snapshot.names.get(code, code) if crypto else fiat_display_name(code, snapshot.names.get(code, code))
+        source_name = snapshot.names.get(code, code) if crypto else fiat_display_name(code, snapshot.names.get(code, code))
+        name = localized_asset_name(code, source_name)
         display = f"₿ {code}  ·  {name}" if crypto else f"{code}  ·  {name}"
         self.display_to_code[display] = code
         self.code_to_display[code] = display
@@ -2232,8 +2423,8 @@ class DualConverterPage(tk.Frame):
                 change = 0.0 if code == base else relative_rate_change(snapshot.changes.get(base), snapshot.changes.get(code))
                 change_text = "—" if change is None else f"{change:+.2f}%"
                 tags = () if change is None else (("up",) if change >= 0 else ("down",))
-                name = fiat_display_name(code, snapshot.names.get(code, code))
-                rows.append(((code, name, self._format(converted), change_text, fiat_region(code), "", ""), tags))
+                name = localized_asset_name(code, fiat_display_name(code, snapshot.names.get(code, code)))
+                rows.append(((code, name, self._format(converted), change_text, tr(fiat_region(code)), "", ""), tags))
         else:
             codes = [code for code in snapshot.rates if snapshot.kinds.get(code) == "crypto"]
             for code in codes:
@@ -2241,7 +2432,7 @@ class DualConverterPage(tk.Frame):
                 change = snapshot.changes.get(code)
                 change_text = "—" if change is None else f"{change:+.2f}%"
                 tags = () if change is None else (("up",) if change >= 0 else ("down",))
-                rows.append(((code, snapshot.names.get(code, code), self._format(converted), change_text, "", ""), tags))
+                rows.append(((code, localized_asset_name(code, snapshot.names.get(code, code)), self._format(converted), change_text, "", ""), tags))
         self.rate_var.set(f"参考表当前按 {self._format(amount)} {base} 换算为列表中的币种数量")
         self.table_default_rows = list(rows)
         self.table_rows = list(rows)
@@ -2648,15 +2839,15 @@ class MarketPage(tk.Frame):
         except CalculationError:
             self.reference_amount_value = 1.0
             self.reference_amount_var.set("1")
-        self.status_var = tk.StringVar(value=(
+        self.status_var = DisplayStringVar(value=(
             "全球货币周期趋势与多币种计价将在这里同步呈现。" if mode == "fiat" else
             "虚拟币批量行情、周期趋势与多币种计价将在这里同步呈现。"
         ))
-        self.refresh_stamp_var = tk.StringVar(value="最新刷新：等待联网")
+        self.refresh_stamp_var = DisplayStringVar(value="最新刷新：等待联网")
         self.market_search_var = tk.StringVar(value=str(restored.get("search", ""))[:128])
         self.price_var = tk.StringVar(value="—")
         self.change_var = tk.StringVar(value="—")
-        self.range_var = tk.StringVar(value="最高 —   最低 —")
+        self.range_var = DisplayStringVar(value="最高 —   最低 —")
         self.loading = False
         self.fiat_display_to_code: dict[str, str] = {}
         self.fiat_values: list[str] = []
@@ -2691,13 +2882,18 @@ class MarketPage(tk.Frame):
         ).grid(row=0, column=2, rowspan=2)
 
         body = tk.Frame(self, bg=COLORS["bg"])
+        self.market_body = body
+        self.market_compact: bool | None = None
         body.grid(row=1, column=0, sticky="nsew", padx=28, pady=(0, 25))
+        body.bind("<Configure>", self._market_body_resized, add="+")
         watch_width = 365 if self.mode == "fiat" else 420
+        self.watch_width = watch_width
         body.grid_columnconfigure(0, weight=0, minsize=watch_width)
         body.grid_columnconfigure(1, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
         watch = tk.Frame(body, bg=COLORS["card"], width=watch_width)
+        self.watch_panel = watch
         watch.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         watch.grid_propagate(False)
         watch.grid_columnconfigure(0, weight=1)
@@ -2748,6 +2944,7 @@ class MarketPage(tk.Frame):
         self.watch_table.bind("<Double-Button-1>", self.select_coin)
 
         chart_card = tk.Frame(body, bg=COLORS["card"])
+        self.chart_card = chart_card
         chart_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         chart_card.grid_columnconfigure(0, weight=1)
         chart_card.grid_rowconfigure(2, weight=1)
@@ -2801,6 +2998,28 @@ class MarketPage(tk.Frame):
         self.raw_points_quote = "CNY"
         self._highlight_days()
 
+    def _market_body_resized(self, event: tk.Event) -> None:
+        compact = int(event.width) < 860
+        if compact == self.market_compact:
+            return
+        self.market_compact = compact
+        if compact:
+            self.market_body.grid_columnconfigure(0, weight=1, minsize=0)
+            self.market_body.grid_columnconfigure(1, weight=0, minsize=0)
+            self.market_body.grid_rowconfigure(0, weight=0, minsize=225)
+            self.market_body.grid_rowconfigure(1, weight=1, minsize=250)
+            self.watch_panel.configure(width=1, height=225)
+            self.watch_panel.grid_configure(row=0, column=0, columnspan=2, padx=0, pady=(0, 7))
+            self.chart_card.grid_configure(row=1, column=0, columnspan=2, padx=0, pady=(7, 0))
+        else:
+            self.market_body.grid_columnconfigure(0, weight=0, minsize=self.watch_width)
+            self.market_body.grid_columnconfigure(1, weight=1, minsize=0)
+            self.market_body.grid_rowconfigure(0, weight=1, minsize=0)
+            self.market_body.grid_rowconfigure(1, weight=0, minsize=0)
+            self.watch_panel.configure(width=self.watch_width, height=1)
+            self.watch_panel.grid_configure(row=0, column=0, columnspan=1, padx=(0, 8), pady=0)
+            self.chart_card.grid_configure(row=0, column=1, columnspan=1, padx=(8, 0), pady=0)
+
     @staticmethod
     def compact(value: float) -> str:
         if abs(value) >= 1_000_000:
@@ -2848,6 +3067,11 @@ class MarketPage(tk.Frame):
         self.visible = False
         self._save_page_state()
 
+    def apply_language(self) -> None:
+        snapshot = self.service.snapshot
+        if snapshot.rates:
+            self.apply_snapshot(snapshot, False, animated=False, reload_chart=False)
+
     def _market_search_changed(self, _value: str) -> None:
         self._render_watch(False)
         self._save_page_state()
@@ -2894,14 +3118,14 @@ class MarketPage(tk.Frame):
         self.fiat_display_to_code.clear()
         values = []
         for code in fiats:
-            display = f"{code} · {fiat_display_name(code, snapshot.names.get(code, code))}"
+            display = f"{code} · {localized_asset_name(code, fiat_display_name(code, snapshot.names.get(code, code)))}"
             values.append(display)
             self.fiat_display_to_code[display] = code
         self.fiat_values = values
         self.fiat_combo.set_values(values)
         asset_kind = "fiat" if self.mode == "fiat" else "crypto"
         asset_values = [
-            f"{code} · {fiat_display_name(code, snapshot.names.get(code, code)) if self.mode == 'fiat' else crypto_display_name(code, snapshot.names.get(code, code))}"
+            f"{code} · {localized_asset_name(code, fiat_display_name(code, snapshot.names.get(code, code)) if self.mode == 'fiat' else crypto_display_name(code, snapshot.names.get(code, code)))}"
             for code in snapshot.rates if snapshot.kinds.get(code) == asset_kind
         ]
         self.market_search_selector.set_values(asset_values)
@@ -2911,9 +3135,13 @@ class MarketPage(tk.Frame):
             self.restored_code = ""
         if self.current_code not in asset_codes and asset_codes:
             self.current_code = asset_codes[0]
+        if self.current_code in asset_codes:
             name = snapshot.names.get(self.current_code, self.current_code)
             if self.mode == "crypto":
                 name = crypto_display_name(self.current_code, name)
+            else:
+                name = fiat_display_name(self.current_code, name)
+            name = localized_asset_name(self.current_code, name)
             self.coin_label.configure(text=f"{self.current_code} / {name}")
         target_fiat = self.restored_quote if self.restored_quote in fiats else old_fiat if old_fiat in fiats else ("CNY" if "CNY" in fiats else fiats[0] if fiats else "")
         for display, code in self.fiat_display_to_code.items():
@@ -2961,10 +3189,10 @@ class MarketPage(tk.Frame):
                 change_text = f"{change:+.1f}%"
                 tags = ("up",) if change >= 0 else ("down",)
             if self.mode == "fiat":
-                name = fiat_display_name(code, snapshot.names.get(code, code))
+                name = localized_asset_name(code, fiat_display_name(code, snapshot.names.get(code, code)))
                 rows.append(((code, name, self.compact(price), change_text), tags))
             else:
-                name = crypto_display_name(code, snapshot.names.get(code, code))
+                name = localized_asset_name(code, crypto_display_name(code, snapshot.names.get(code, code)))
                 rows.append(((code, name, self.compact(price), change_text), tags))
         self.watch_default_rows = list(rows)
         self.watch_rows = list(rows)
@@ -3085,6 +3313,7 @@ class MarketPage(tk.Frame):
             name = fiat_display_name(self.current_code, name)
         else:
             name = crypto_display_name(self.current_code, name)
+        name = localized_asset_name(self.current_code, name)
         self.coin_label.configure(text=f"{self.current_code} / {name}")
         self._save_page_state()
         self.load_chart()
@@ -3301,6 +3530,7 @@ class SettingsPage(tk.Frame):
         master: tk.Misc,
         settings: AppSettings,
         theme_callback: Callable[[str], None],
+        language_callback: Callable[[str], None],
         timezone_callback: Callable[[str], None],
         data_callback: Callable[[bool], None],
         setting_callback: Callable[[str, object], None],
@@ -3326,6 +3556,7 @@ class SettingsPage(tk.Frame):
         super().__init__(master, bg=COLORS["bg"])
         self.settings = settings
         self.theme_callback = theme_callback
+        self.language_callback = language_callback
         self.timezone_callback = timezone_callback
         self.data_callback = data_callback
         self.setting_callback = setting_callback
@@ -3347,14 +3578,16 @@ class SettingsPage(tk.Frame):
         self.update_download_callback = update_download_callback
         self.update_install_callback = update_install_callback
         self.exit_callback = exit_callback
-        self.theme_display_to_name = {label: name for name, label in THEME_LABELS.items()}
-        self.theme_name_to_display = dict(THEME_LABELS)
+        self.theme_name_to_display = {name: theme_label(name, settings.language) for name in THEMES}
+        self.theme_display_to_name = {label: name for name, label in self.theme_name_to_display.items()}
         self.theme_var = tk.StringVar(
-            value=self.theme_name_to_display.get(settings.theme, THEME_LABELS["dark"])
+            value=self.theme_name_to_display.get(settings.theme, theme_label("dark", settings.language))
         )
-        self.theme_cycle_var = tk.StringVar(value=self._theme_cycle_text(settings.theme))
+        self.theme_cycle_var = DisplayStringVar(value=self._theme_cycle_text(settings.theme))
+        self.language_display_to_code = {label: code for code, label in LANGUAGE_LABELS.items()}
+        self.language_var = tk.StringVar(value=LANGUAGE_LABELS[normalize_language(settings.language)])
         self.timezone_var = tk.StringVar()
-        self.timezone_clock_var = tk.StringVar()
+        self.timezone_clock_var = DisplayStringVar()
         self.keep_var = tk.BooleanVar(value=settings.keep_data_with_app)
         self.auto_refresh_var = tk.BooleanVar(value=settings.auto_refresh_enabled)
         self.fiat_minutes_var = tk.StringVar(value=str(settings.fiat_refresh_minutes))
@@ -3371,16 +3604,16 @@ class SettingsPage(tk.Frame):
         self.retain_history_var = tk.BooleanVar(value=settings.retain_history)
         self.copy_format_var = tk.StringVar(value=self.COPY_LABELS[settings.copy_result_format])
         self.cache_limit_var = tk.StringVar(value=str(settings.cache_limit_mb))
-        self.cache_size_var = tk.StringVar(value="正在统计…")
+        self.cache_size_var = DisplayStringVar(value="正在统计…")
         self.app_path_var = tk.StringVar(value=str(portable_dir()))
         self.data_path_var = tk.StringVar(value=str(settings.resolved_data_dir()))
         self.api_enabled_var = tk.BooleanVar(value=bool(settings.local_api.get("enabled", False)))
         self.api_port_var = tk.StringVar(value=str(settings.local_api.get("port", 17890)))
-        self.api_status_var = tk.StringVar(value=api_status_getter())
+        self.api_status_var = DisplayStringVar(value=api_status_getter())
         self.api_token_once_var = tk.StringVar(value="")
         self.api_results = TkResultBridge(self, self._finish_api_action)
         self.api_action_busy = False
-        self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION} · 尚未检查更新")
+        self.update_status_var = DisplayStringVar(value=f"当前版本 {APP_VERSION} · 尚未检查更新")
         self.update_results = TkResultBridge(self, self._finish_update_action)
         self.update_action_busy = False
         self.available_update: UpdateInfo | None = None
@@ -3388,6 +3621,7 @@ class SettingsPage(tk.Frame):
         self.zone_infos = {zone: ZoneInfo(zone) for zone in self.zones}
         self.zone_display_to_name: dict[str, str] = {}
         self.zone_name_to_display: dict[str, str] = {}
+        self.timezone_search_aliases: dict[str, str] = {}
         self.timezone_values = self._timezone_displays()
         self.timezone_options_hour = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d%H")
         self.timezone_var.set(self.zone_name_to_display.get(settings.timezone, settings.timezone))
@@ -3415,16 +3649,18 @@ class SettingsPage(tk.Frame):
         self.settings_canvas.grid(row=0, column=0, sticky="nsew")
         self.settings_scroll.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         body = tk.Frame(self.settings_canvas, bg=COLORS["bg"])
+        self.settings_body = body
+        self._settings_cards: list[tuple[tk.Frame, int, int, int]] = []
         self.settings_window = self.settings_canvas.create_window((0, 0), window=body, anchor="nw")
         body.grid_columnconfigure(0, weight=1, uniform="settings")
         body.grid_columnconfigure(1, weight=1, uniform="settings")
         body.bind("<Configure>", lambda _e: self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
-        self.settings_canvas.bind("<Configure>", lambda e: self.settings_canvas.itemconfigure(self.settings_window, width=e.width))
+        self.settings_canvas.bind("<Configure>", self._settings_canvas_resized, add="+")
 
         appearance = self._card(
             body,
             "外观主题",
-            f"{len(THEMES)} 套成熟配色适配主题；每套都有独立色块预览，布局与字号保持不变",
+            f"{len(THEMES)} 套全新配色；每套独立指定白色或黑色文字",
             0,
             0,
             columnspan=2,
@@ -3433,15 +3669,26 @@ class SettingsPage(tk.Frame):
         self.theme_picker.pack(fill="x", padx=20, pady=(12, 8))
         tk.Label(
             appearance,
-            text="色块依次展示背景、卡片、强调色、上涨色与下跌色；展开后点击任意主题即可即时预览。",
+            text="配色预览依次显示背景、卡片、按钮、强调色与文字色。",
             bg=COLORS["card"],
             fg=COLORS["muted"],
             font=(FONT, 8),
         ).pack(anchor="w", padx=20, pady=(0, 18))
 
-        timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 1, 0)
-        self.timezone_combo = SearchSelect(timezone_card, self.timezone_var, values=self.timezone_values, command=self._set_timezone, width=34, font_size=10, max_rows=8)
-        self.timezone_combo.pack(fill="x", padx=20, pady=(12, 7))
+        timezone_card = self._card(body, "程序语言与刷新时区", "可使用中文城市、国家/地区或 IANA 名称搜索", 1, 0)
+        tk.Label(timezone_card, text="程序默认语言", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(11, 4))
+        self.language_combo = SearchSelect(
+            timezone_card, self.language_var, values=list(LANGUAGE_LABELS.values()),
+            command=self._set_language, width=34, font_size=10, max_rows=4,
+        )
+        self.language_combo.pack(fill="x", padx=20, pady=(0, 9))
+        tk.Label(timezone_card, text="刷新显示时区", bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(0, 4))
+        self.timezone_combo = SearchSelect(
+            timezone_card, self.timezone_var, values=self.timezone_values,
+            command=self._set_timezone, width=34, font_size=10, max_rows=8,
+            search_aliases=self.timezone_search_aliases,
+        )
+        self.timezone_combo.pack(fill="x", padx=20, pady=(0, 7))
         tk.Label(
             timezone_card, textvariable=self.timezone_clock_var, bg=COLORS["card_alt"], fg=COLORS["accent"],
             font=(FONT, 9, "bold"), padx=10, pady=6,
@@ -3456,8 +3703,16 @@ class SettingsPage(tk.Frame):
         self._check(refresh_card, "最小化后继续按设定时间刷新", self.refresh_minimized_var, "refresh_when_minimized", pady=(2, 16))
 
         startup = self._card(body, "启动与关闭", "曜衡只运行一个窗口；重复启动会唤醒现有窗口", 2, 0, columnspan=2)
-        self._select_row(startup, "默认启动页面", self.startup_page_var, list(self.PAGE_LABELS.values()), lambda value: self._save("startup_page", self._reverse(self.PAGE_LABELS, value)))
-        self._select_row(startup, "点击关闭按钮", self.close_action_var, list(self.CLOSE_LABELS.values()), lambda value: self._save("close_action", self._reverse(self.CLOSE_LABELS, value)))
+        self.page_labels = {key: tr(value) for key, value in self.PAGE_LABELS.items()}
+        self.close_labels = {key: tr(value) for key, value in self.CLOSE_LABELS.items()}
+        self.mode_labels = {key: tr(value) for key, value in self.MODE_LABELS.items()}
+        self.copy_labels = {key: tr(value) for key, value in self.COPY_LABELS.items()}
+        self.startup_page_var.set(self.page_labels[self.settings.startup_page])
+        self.close_action_var.set(self.close_labels[self.settings.close_action])
+        self.default_mode_var.set(self.mode_labels[self.settings.default_calculator_mode])
+        self.copy_format_var.set(self.copy_labels[self.settings.copy_result_format])
+        self.startup_page_combo = self._select_row(startup, "默认启动页面", self.startup_page_var, list(self.page_labels.values()), lambda value: self._save("startup_page", self._reverse(self.page_labels, value)))
+        self.close_action_combo = self._select_row(startup, "点击关闭按钮", self.close_action_var, list(self.close_labels.values()), lambda value: self._save("close_action", self._reverse(self.close_labels, value)))
         self._check(startup, "记住上次打开的页面", self.remember_page_var, "remember_last_page")
         self._check(startup, "记住窗口大小和位置", self.remember_geometry_var, "remember_window_geometry", pady=(2, 16))
 
@@ -3466,9 +3721,9 @@ class SettingsPage(tk.Frame):
         calc_grid.pack(fill="x", padx=20, pady=(9, 4))
         for column in range(3):
             calc_grid.grid_columnconfigure(column, weight=1, uniform="calc_settings")
-        self._select_cell(calc_grid, 0, "默认模式", self.default_mode_var, list(self.MODE_LABELS.values()), lambda value: self._save("default_calculator_mode", self._reverse(self.MODE_LABELS, value)))
-        self._select_cell(calc_grid, 1, "角度模式", self.angle_mode_var, ["DEG", "RAD"], lambda value: self._save("calculator_angle_mode", value))
-        self._select_cell(calc_grid, 2, "复制结果格式", self.copy_format_var, list(self.COPY_LABELS.values()), lambda value: self._save("copy_result_format", self._reverse(self.COPY_LABELS, value)))
+        self.default_mode_combo = self._select_cell(calc_grid, 0, "默认模式", self.default_mode_var, list(self.mode_labels.values()), lambda value: self._save("default_calculator_mode", self._reverse(self.mode_labels, value)))
+        self.angle_mode_combo = self._select_cell(calc_grid, 1, "角度模式", self.angle_mode_var, ["DEG", "RAD"], lambda value: self._save("calculator_angle_mode", value))
+        self.copy_format_combo = self._select_cell(calc_grid, 2, "复制结果格式", self.copy_format_var, list(self.copy_labels.values()), lambda value: self._save("copy_result_format", self._reverse(self.copy_labels, value)))
         calc_checks = tk.Frame(calculator, bg=COLORS["card"])
         calc_checks.pack(fill="x", padx=20, pady=(4, 14))
         self._check(calc_checks, "记住上次标准/专业模式", self.remember_mode_var, "remember_calculator_mode", pack_side="left")
@@ -3579,43 +3834,28 @@ class SettingsPage(tk.Frame):
         ):
             AppButton(actions, text, callback, kind, 9).pack(side="left", padx=(0, 8), ipadx=7, ipady=6)
 
-        theme_cycle = self._card(
-            body,
-            "快速切换主题",
-            "不展开主题列表也能按上方展示顺序逐套切换",
-            8,
-            0,
-            columnspan=2,
-        )
-        cycle_row = tk.Frame(theme_cycle, bg=COLORS["card"])
-        cycle_row.pack(fill="x", padx=20, pady=(10, 18))
-        tk.Label(
-            cycle_row,
-            textvariable=self.theme_cycle_var,
-            bg=COLORS["card_alt"],
-            fg=COLORS["muted"],
-            font=(FONT, 9, "bold"),
-            anchor="w",
-            padx=12,
-            pady=9,
-        ).pack(side="left", expand=True, fill="x", padx=(0, 12))
-        self.theme_cycle_button = AppButton(
-            cycle_row,
-            "切换下一个主题",
-            self._next_theme,
-            "accent",
-            9,
-        )
-        self.theme_cycle_button.pack(side="left", ipadx=10, ipady=6)
-
         self._bind_mousewheel(body)
 
     def _card(self, parent: tk.Misc, title: str, subtitle: str, row: int, column: int, columnspan: int = 1) -> tk.Frame:
         card = tk.Frame(parent, bg=COLORS["card"])
+        self._settings_cards.append((card, row, column, columnspan))
         card.grid(row=row, column=column, columnspan=columnspan, sticky="nsew", padx=(0, 7) if column == 0 and columnspan == 1 else (7, 0) if column == 1 else 0, pady=(0, 10))
         tk.Label(card, text=title, bg=COLORS["card"], fg=COLORS["text"], font=(FONT, 14, "bold")).pack(anchor="w", padx=20, pady=(17, 4))
         tk.Label(card, text=subtitle, bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9)).pack(anchor="w", padx=20)
         return card
+
+    def _settings_canvas_resized(self, event: tk.Event) -> None:
+        self.settings_canvas.itemconfigure(self.settings_window, width=event.width)
+        compact = int(event.width) < 780
+        self.settings_body.grid_columnconfigure(1, weight=0 if compact else 1)
+        for index, (card, row, column, columnspan) in enumerate(self._settings_cards):
+            if compact:
+                card.grid_configure(row=index, column=0, columnspan=1, padx=0)
+            else:
+                card.grid_configure(
+                    row=row, column=column, columnspan=columnspan,
+                    padx=(0, 7) if column == 0 and columnspan == 1 else (7, 0) if column == 1 else 0,
+                )
 
     @staticmethod
     def _reverse(mapping: dict[str, str], value: str) -> str:
@@ -3626,7 +3866,8 @@ class SettingsPage(tk.Frame):
         order = tuple(THEMES)
         current = theme if theme in THEMES else order[0]
         following = order[(order.index(current) + 1) % len(order)]
-        return f"当前：{THEME_LABELS[current]}    下一套：{THEME_LABELS[following]}"
+        language = get_language()
+        return f"当前：{theme_label(current, language)}    下一套：{theme_label(following, language)}"
 
     @staticmethod
     def _check_style() -> dict[str, object]:
@@ -3655,19 +3896,21 @@ class SettingsPage(tk.Frame):
         entry.bind("<FocusOut>", commit)
         return frame
 
-    def _select_row(self, parent: tk.Misc, label: str, variable: tk.StringVar, values: list[str], callback: Callable[[str], None]) -> None:
+    def _select_row(self, parent: tk.Misc, label: str, variable: tk.StringVar, values: list[str], callback: Callable[[str], None]) -> SearchSelect:
         row = tk.Frame(parent, bg=COLORS["card"])
         row.pack(fill="x", padx=20, pady=(8, 2))
         tk.Label(row, text=label, bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 9, "bold"), width=12, anchor="w").pack(side="left")
         combo = SearchSelect(row, variable, values=values, command=callback, width=20, font_size=9, max_rows=7)
         combo.pack(side="left", expand=True, fill="x")
+        return combo
 
-    def _select_cell(self, parent: tk.Misc, column: int, label: str, variable: tk.StringVar, values: list[str], callback: Callable[[str], None]) -> None:
+    def _select_cell(self, parent: tk.Misc, column: int, label: str, variable: tk.StringVar, values: list[str], callback: Callable[[str], None]) -> SearchSelect:
         cell = tk.Frame(parent, bg=COLORS["card"])
         cell.grid(row=0, column=column, sticky="ew", padx=(0, 6) if column == 0 else (6, 6) if column == 1 else (6, 0))
         tk.Label(cell, text=label, bg=COLORS["card"], fg=COLORS["muted"], font=(FONT, 8, "bold")).pack(anchor="w")
         combo = SearchSelect(cell, variable, values=values, command=callback, width=18, font_size=9, max_rows=6)
         combo.pack(fill="x", pady=(4, 0))
+        return combo
 
     def _path_row(self, parent: tk.Frame, row: int, label: str, variable: tk.StringVar, actions: list[tuple[str, Callable[[], None]]]) -> None:
         base_row = 2 + row * 2
@@ -3887,6 +4130,42 @@ class SettingsPage(tk.Frame):
         self.theme_callback(selected)
         self.theme_cycle_var.set(self._theme_cycle_text(selected))
 
+    def _set_language(self, display: str) -> None:
+        language = self.language_display_to_code.get(str(display), normalize_language(display))
+        self.language_var.set(LANGUAGE_LABELS[language])
+        self.language_callback(language)
+
+    def apply_language(self) -> None:
+        language = normalize_language(self.settings.language)
+        self.language_var.set(LANGUAGE_LABELS[language])
+        self.theme_name_to_display = {name: theme_label(name, language) for name in THEMES}
+        self.theme_display_to_name = {label: name for name, label in self.theme_name_to_display.items()}
+        self.theme_var.set(self.theme_name_to_display[self.settings.theme])
+        self.theme_cycle_var.set(self._theme_cycle_text(self.settings.theme))
+        self.page_labels = {key: tr(value) for key, value in self.PAGE_LABELS.items()}
+        self.close_labels = {key: tr(value) for key, value in self.CLOSE_LABELS.items()}
+        self.mode_labels = {key: tr(value) for key, value in self.MODE_LABELS.items()}
+        self.copy_labels = {key: tr(value) for key, value in self.COPY_LABELS.items()}
+        self.startup_page_combo.set_values(list(self.page_labels.values()))
+        self.startup_page_var.set(self.page_labels[self.settings.startup_page])
+        self.close_action_combo.set_values(list(self.close_labels.values()))
+        self.close_action_var.set(self.close_labels[self.settings.close_action])
+        self.default_mode_combo.set_values(list(self.mode_labels.values()))
+        self.default_mode_var.set(self.mode_labels[self.settings.default_calculator_mode])
+        self.copy_format_combo.set_values(list(self.copy_labels.values()))
+        self.copy_format_var.set(self.copy_labels[self.settings.copy_result_format])
+        self.timezone_values = self._timezone_displays()
+        self.timezone_combo.set_values(self.timezone_values, self.timezone_search_aliases)
+        self.timezone_combo.set(self.zone_name_to_display.get(self.settings.timezone, self.settings.timezone))
+        self.theme_picker.apply_language()
+        if self.timezone_job is not None:
+            try:
+                self.after_cancel(self.timezone_job)
+            except tk.TclError:
+                pass
+            self.timezone_job = None
+        self._update_timezone_time()
+
     def _next_theme(self) -> None:
         order = tuple(THEMES)
         current = self.settings.theme if self.settings.theme in THEMES else order[0]
@@ -3896,16 +4175,19 @@ class SettingsPage(tk.Frame):
         now = now or datetime.now(ZoneInfo("UTC"))
         display_to_name: dict[str, str] = {}
         name_to_display: dict[str, str] = {}
+        search_aliases: dict[str, str] = {}
         values: list[str] = []
         for zone in self.zones:
             local = now.astimezone(self.zone_infos[zone])
             offset = local.strftime("%z") or "+0000"
-            display = f"UTC{offset[:3]}:{offset[3:]}  ·  {zone}"
+            display = f"UTC{offset[:3]}:{offset[3:]}  ·  {timezone_display_name(zone)}  ·  {zone}"
             display_to_name[display] = zone
             name_to_display[zone] = display
+            search_aliases[display] = timezone_search_text(zone)
             values.append(display)
         self.zone_display_to_name = display_to_name
         self.zone_name_to_display = name_to_display
+        self.timezone_search_aliases = search_aliases
         return values
 
     def _update_timezone_time(self) -> None:
@@ -3917,7 +4199,7 @@ class SettingsPage(tk.Frame):
             popup_open = self.timezone_combo.popup is not None and self.timezone_combo.popup.winfo_viewable()
             if focus is not self.timezone_combo.entry and not popup_open:
                 self.timezone_values = self._timezone_displays(utc_now)
-                self.timezone_combo.set_values(self.timezone_values)
+                self.timezone_combo.set_values(self.timezone_values, self.timezone_search_aliases)
                 self.timezone_combo.set(self.zone_name_to_display.get(self.settings.timezone, self.settings.timezone))
                 self.timezone_options_hour = hour
         zone = self.settings.timezone if self.settings.timezone in self.zone_infos else "UTC"
@@ -3972,6 +4254,7 @@ class YaohengApp:
     def __init__(self) -> None:
         self.settings_store = SettingsStore()
         self.settings = self.settings_store.load()
+        set_ui_language(self.settings.language)
         COLORS.clear()
         COLORS.update(THEMES[self.settings.theme])
         self.root = tk.Tk()
@@ -3981,7 +4264,7 @@ class YaohengApp:
             self.root.geometry(geometry)
         except tk.TclError:
             self.root.geometry("1380x820")
-        self.root.minsize(1240, 740)
+        self.root.minsize(900, 620)
         self.root.configure(bg=COLORS["bg"])
         self.root.update_idletasks()
         self._ensure_window_visible()
@@ -4033,19 +4316,23 @@ class YaohengApp:
         self.exiting = False
         self.update_installing = False
         self.persistence_warning_shown = False
+        self.sidebar_compact: bool | None = None
         self.rate_results = TkResultBridge(self.root, self._finish_rates)
         self._styles()
         self._shell()
         start_page = self.settings.last_page if self.settings.remember_last_page else self.settings.startup_page
         self.show_page(start_page if start_page in self.pages else "calculator")
-        self.root.bind("<Key>", self.on_key)
+        self.root.bind_all("<KeyPress>", self.on_key, add="+")
         self.root.bind("<Configure>", self._queue_geometry_save, add="+")
+        self.root.bind("<Configure>", self._responsive_window_changed, add="+")
         self.root.bind_all("<Button-1>", self._dismiss_search_popup, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
         if self.service.snapshot.rates:
             self.apply_snapshot(self.service.snapshot, True)
         self.startup_job = self.root.after(350, lambda: self.refresh_rates("all"))
         self.api_start_job = self.root.after(150, self._start_local_api_if_enabled)
+        self.root.after(120, self._activate_calculator_if_current)
+        self.root.after_idle(self._responsive_window_changed)
 
     def _styles(self) -> None:
         style = ttk.Style(self.root)
@@ -4071,14 +4358,14 @@ class YaohengApp:
         style.configure(
             "Treeview", background=COLORS["card"], fieldbackground=COLORS["card"],
             foreground=COLORS["text"], rowheight=31, borderwidth=0,
-            focuscolor="#000000", focusthickness=2, font=(FONT, 9, "bold"),
+            focuscolor=COLORS["focus"], focusthickness=2, font=(FONT, 9, "bold"),
         )
         style.map("Treeview", background=[], foreground=[])
         style.configure(
             "Market.Treeview", background=COLORS["card"], fieldbackground=COLORS["card"],
             foreground=COLORS["text"], rowheight=31, borderwidth=0, relief="flat",
             bordercolor=COLORS["accent"], lightcolor=COLORS["accent"], darkcolor=COLORS["accent"],
-            focuscolor="#000000", focusthickness=2, font=(FONT, 9, "bold"),
+            focuscolor=COLORS["focus"], focusthickness=2, font=(FONT, 9, "bold"),
         )
         style.map("Market.Treeview", background=[], foreground=[])
         style.configure("Treeview.Heading", background=COLORS["card_alt"], foreground=COLORS["muted"], relief="flat", borderwidth=0, font=(FONT, 9, "bold"), padding=8)
@@ -4118,16 +4405,17 @@ class YaohengApp:
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
         self.sidebar.grid_columnconfigure(0, weight=1)
-        self.sidebar.grid_rowconfigure(9, weight=1)
+        self.sidebar.grid_rowconfigure(10, weight=1)
         brand = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
+        self.sidebar_brand = brand
         brand.grid(row=0, column=0, sticky="ew", padx=18, pady=(26, 32))
         self.logo_canvas = tk.Canvas(brand, width=42, height=42, bg=COLORS["sidebar"], bd=0, highlightthickness=0)
         self.logo_canvas.pack(side="left")
         self._draw_logo()
-        names = tk.Frame(brand, bg=COLORS["sidebar"])
-        names.pack(side="left", padx=10)
-        tk.Label(names, text="曜衡", bg=COLORS["sidebar"], fg=COLORS["text"], font=(FONT, 15, "bold")).pack(anchor="w")
-        tk.Label(names, text="精准计算 · 实时金融", bg=COLORS["sidebar"], fg=COLORS["accent"], font=(FONT, 7, "bold")).pack(anchor="w")
+        self.brand_names = tk.Frame(brand, bg=COLORS["sidebar"])
+        self.brand_names.pack(side="left", padx=10)
+        tk.Label(self.brand_names, text="曜衡", bg=COLORS["sidebar"], fg=COLORS["sidebar_text"], font=(FONT, 15, "bold")).pack(anchor="w")
+        tk.Label(self.brand_names, text="精准计算 · 实时金融", bg=COLORS["sidebar"], fg=COLORS["accent"], font=(FONT, 7, "bold")).pack(anchor="w")
 
         items = [
             ("calculator", "▦   计算器", 11, 22),
@@ -4139,17 +4427,31 @@ class YaohengApp:
             ("market", "　　₿⌁  虚拟币行情趋势", 9, 22),
             ("settings", "⚙   设置", 11, 22),
         ]
+        self.nav_full_text = {key: text for key, text, _font_size, _left_pad in items}
+        self.nav_compact_text = {
+            "calculator": "▦", "exchange": "⇄", "market_exchange": "⇆", "fiat": "¥",
+            "fiat_market": "¥⌁", "crypto": "₿", "market": "₿⌁", "settings": "⚙",
+        }
         for row, (key, text, font_size, left_pad) in enumerate(items, start=1):
             button = tk.Button(
                 self.sidebar, text=text, command=lambda page=key: self.show_page(page), anchor="w",
-                bg=COLORS["sidebar"], fg=COLORS["muted"], activebackground=COLORS["card_alt"],
-                activeforeground=COLORS["text"], relief="flat", bd=0, highlightthickness=0,
+                bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"], activebackground=COLORS["nav_hover"],
+                activeforeground=COLORS["sidebar_text"], relief="flat", bd=0, highlightthickness=0,
                 font=(FONT, font_size, "bold"), padx=left_pad, pady=(10 if font_size < 11 else 13), cursor="hand2",
             )
             button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
             self.nav_buttons[key] = button
+        self.sidebar_theme_button = tk.Button(
+            self.sidebar, text="◐   下一主题", command=self.cycle_theme, anchor="w",
+            bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
+            activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
+            relief="flat", bd=0, highlightthickness=0, font=(FONT, 9, "bold"),
+            padx=22, pady=9, cursor="hand2",
+        )
+        self.sidebar_theme_button.grid(row=9, column=0, sticky="ew", padx=10, pady=(0, 3))
         footer = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
-        footer.grid(row=10, column=0, sticky="sew", padx=22, pady=20)
+        self.sidebar_footer = footer
+        footer.grid(row=11, column=0, sticky="sew", padx=22, pady=20)
         self.network_button = tk.Button(
             footer, text="●  正在准备联网  ↻", command=self.refresh_rates, anchor="center",
             bg=COLORS["accent_dark"], fg=COLORS["accent"], activebackground=COLORS["card_alt"],
@@ -4163,7 +4465,7 @@ class YaohengApp:
         )
         self.network_status.pack(fill="x", pady=(8, 0))
         self.network_time = tk.Label(
-            footer, text="等待首次连接", bg=COLORS["sidebar"], fg=COLORS["muted"],
+            footer, text="等待首次连接", bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
             font=(FONT, 8), justify="left", anchor="w", wraplength=172,
         )
         self.network_time.pack(fill="x", pady=(6, 0))
@@ -4233,7 +4535,7 @@ class YaohengApp:
             state_callback=lambda state: self.save_page_state("market", state),
         )
         self.pages["settings"] = SettingsPage(
-            content, self.settings, self.set_theme, self.set_timezone, self.set_keep_data_with_app,
+            content, self.settings, self.set_theme, self.set_language, self.set_timezone, self.set_keep_data_with_app,
             self.save_setting, self.choose_data_directory, self.migrate_application,
             self.service.cache_size_bytes, self.clear_cache, self.export_settings, self.import_settings,
             self.reset_settings, lambda: self.open_folder(portable_dir()),
@@ -4261,6 +4563,57 @@ class YaohengApp:
         self.logo_canvas.create_polygon(21, 2, 38, 11, 38, 31, 21, 40, 4, 31, 4, 11, outline=BRAND_ORANGE, fill=BRAND_DARK, width=2)
         self.logo_canvas.create_line(10, 27, 21, 8, 32, 27, fill=BRAND_ORANGE, width=3, smooth=True)
         self.logo_canvas.create_polygon(21, 17, 27, 23, 21, 29, 15, 23, fill=BRAND_ORANGE, outline="")
+
+    def cycle_theme(self) -> None:
+        order = tuple(THEMES)
+        current = self.settings.theme if self.settings.theme in THEMES else order[0]
+        self.set_theme(order[(order.index(current) + 1) % len(order)])
+
+    def _responsive_window_changed(self, event: tk.Event | None = None) -> None:
+        if event is not None and event.widget is not self.root:
+            return
+        width = int(event.width) if event is not None else int(self.root.winfo_width())
+        compact = width < 1080
+        if compact == self.sidebar_compact:
+            return
+        self.sidebar_compact = compact
+        self.sidebar.configure(width=76 if compact else 216)
+        if compact:
+            self.brand_names.pack_forget()
+            self.sidebar_brand.grid_configure(padx=17, pady=(20, 22))
+        else:
+            if not self.brand_names.winfo_manager():
+                self.brand_names.pack(side="left", padx=10)
+            self.sidebar_brand.grid_configure(padx=18, pady=(26, 32))
+        for key, button in self.nav_buttons.items():
+            button.configure(
+                text=self.nav_compact_text[key] if compact else self.nav_full_text[key],
+                anchor="center" if compact else "w",
+                padx=4 if compact else 22,
+                font=(FONT, 10 if compact else (9 if key in {"fiat_market", "market"} else 11), "bold"),
+            )
+        self.sidebar_theme_button.configure(
+            text="◐" if compact else "◐   下一主题",
+            anchor="center" if compact else "w",
+            padx=4 if compact else 22,
+        )
+        if compact:
+            self.network_status.pack_forget()
+            self.network_time.pack_forget()
+            self.sidebar_footer.grid_configure(padx=10, pady=14)
+            self.network_button.configure(padx=2)
+        else:
+            if not self.network_status.winfo_manager():
+                self.network_status.pack(fill="x", pady=(8, 0))
+            if not self.network_time.winfo_manager():
+                self.network_time.pack(fill="x", pady=(6, 0))
+            self.sidebar_footer.grid_configure(padx=22, pady=20)
+            self.network_button.configure(padx=10)
+
+    def _activate_calculator_if_current(self) -> None:
+        page = self.pages.get("calculator")
+        if self.current_page == "calculator" and isinstance(page, CalculatorPage):
+            page.activate_keyboard()
 
     def format_timestamp(self, value: str) -> str:
         try:
@@ -4292,11 +4645,14 @@ class YaohengApp:
             self._persist_settings(notify=False)
         self.pages[page].tkraise()
         current = self.pages[page]
-        if changed and hasattr(current, "on_show"):
+        if hasattr(current, "on_show"):
             current.on_show()  # type: ignore[attr-defined]
         for key, button in self.nav_buttons.items():
             active = key == page
-            button.configure(bg=COLORS["accent_dark"] if active else COLORS["sidebar"], fg=COLORS["accent"] if active else COLORS["muted"])
+            button.configure(
+                bg=COLORS["nav_active"] if active else COLORS["sidebar"],
+                fg=COLORS["nav_active_text"] if active else COLORS["sidebar_muted"],
+            )
 
     def _dismiss_search_popup(self, event: tk.Event) -> None:
         active = getattr(self.root, "_active_search_select", None)
@@ -4945,14 +5301,35 @@ class YaohengApp:
             candidates = keys_by_color.get(value, [])
             if not candidates:
                 return None
+            foreground_options = {"foreground", "activeforeground", "selectforeground", "disabledforeground", "insertbackground"}
+            if option in foreground_options:
+                if option == "selectforeground":
+                    return "selection_text"
+                try:
+                    widget_background = str(widget.cget("background"))
+                except (tk.TclError, TypeError):
+                    widget_background = ""
+                contextual_text = (
+                    ("calc_operator_bg", "calc_operator_text"),
+                    ("calc_function_bg", "calc_function_text"),
+                    ("calc_number_bg", "calc_number_text"),
+                    ("accent", "on_accent"),
+                    ("nav_active", "nav_active_text"),
+                    ("input_bg", "input_text"),
+                    ("sidebar", "sidebar_text"),
+                    ("display_bg", "display_text"),
+                )
+                for background_role, text_role in contextual_text:
+                    if widget_background == old.get(background_role) and value == old.get(text_role):
+                        return text_role
+                for preferred in (
+                    "muted", "subtle", "accent", "text", "sidebar_muted", "sidebar_text",
+                    "input_text", "button_text", "key_text", "display_expression", "display_text",
+                ):
+                    if value == old.get(preferred):
+                        return preferred
             if len(candidates) == 1:
                 return candidates[0]
-            # Light mode intentionally shares white between cards, the sidebar,
-            # accent-button text and chart tooltips. Widget context disambiguates
-            # those roles when returning to the dark palette.
-            if option in {"foreground", "activeforeground", "selectforeground", "disabledforeground"}:
-                if "on_accent" in candidates:
-                    return "on_accent"
             if "sidebar" in candidates and hasattr(self, "sidebar") and belongs_to(widget, self.sidebar):
                 return "sidebar"
             if "card" in candidates:
@@ -4969,12 +5346,15 @@ class YaohengApp:
         supported_options: dict[type[object], tuple[str, ...]] = {}
         themed_selects: list[SearchSelect] = []
         themed_palette_pickers: list[ThemePalettePicker] = []
+        themed_calculator_keys: list[CalculatorKey] = []
 
         def recolor(widget: tk.Misc) -> None:
             if isinstance(widget, SearchSelect):
                 themed_selects.append(widget)
             if isinstance(widget, ThemePalettePicker):
                 themed_palette_pickers.append(widget)
+            if isinstance(widget, CalculatorKey):
+                themed_calculator_keys.append(widget)
             changes: dict[str, str] = {}
             widget_type = type(widget)
             options = supported_options.get(widget_type)
@@ -5010,9 +5390,23 @@ class YaohengApp:
             select.apply_theme()
         for picker in themed_palette_pickers:
             picker.set_theme(theme)
+        for calculator_key in themed_calculator_keys:
+            calculator_key.apply_theme()
+        for key, button in self.nav_buttons.items():
+            active = key == self.current_page
+            button.configure(
+                bg=COLORS["nav_active"] if active else COLORS["sidebar"],
+                fg=COLORS["nav_active_text"] if active else COLORS["sidebar_muted"],
+                activebackground=COLORS["nav_hover"],
+                activeforeground=COLORS["sidebar_text"],
+            )
+        self.sidebar_theme_button.configure(
+            bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"],
+            activebackground=COLORS["nav_hover"], activeforeground=COLORS["sidebar_text"],
+        )
         settings_page = self.pages.get("settings")
         if isinstance(settings_page, SettingsPage):
-            settings_page.theme_var.set(THEME_LABELS[theme])
+            settings_page.theme_var.set(theme_label(theme, self.settings.language))
             settings_page.theme_cycle_var.set(settings_page._theme_cycle_text(theme))
         for key in ("fiat", "crypto"):
             page = self.pages.get(key)
@@ -5033,6 +5427,24 @@ class YaohengApp:
                 except tk.TclError:
                     pass
         self.last_theme_switch_ms = (time.perf_counter() - started) * 1000
+
+    def set_language(self, language: str) -> None:
+        selected = normalize_language(language)
+        if selected == self.settings.language and get_language() == selected:
+            return
+        self.settings.language = selected
+        set_ui_language(selected)
+        self.settings_store.schedule_save(self.settings)
+        refresh_widget_tree(self.root)
+        for page in self.pages.values():
+            apply_language = getattr(page, "apply_language", None)
+            if callable(apply_language):
+                try:
+                    apply_language()
+                except (RuntimeError, tk.TclError, ValueError):
+                    pass
+        self.root.title(f"曜衡 {APP_VERSION}")
+        self.set_timezone(self.settings.timezone)
 
     def set_timezone(self, zone: str) -> None:
         try:

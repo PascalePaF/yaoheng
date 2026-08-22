@@ -1,6 +1,7 @@
 {
   "schema_version": 3,
   "theme": "dark",
+  "language": "zh_CN",
   "timezone": "Asia/Tokyo",
   "data_dir": "",
   "keep_data_with_app": true,

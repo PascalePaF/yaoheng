@@ -853,7 +853,8 @@ class SettingsUiPerformanceTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertEqual(first[0], "UTC+00:00  ·  UTC")
+        self.assertEqual(first[0], "UTC+00:00  ·  协调世界时  ·  UTC")
+        self.assertIn("日本", page.timezone_search_aliases[first[1]])
 
 
 if __name__ == "__main__":

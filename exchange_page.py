@@ -25,6 +25,7 @@ from conversion_core import (
     normalize_currency_code,
     parse_amount,
 )
+from localization import localized_asset_name, tr
 
 
 DEFAULT_EXCHANGE_CURRENCIES = ("CNY", "USD", "EUR", "JPY", "HKD", "BTC", "USDT")
@@ -909,19 +910,20 @@ class ExchangePage(tk.Frame):
         self.amount_vars[int(state.active_slot)].set(state.amount)
         self.amount_var = self.amount_vars[int(state.active_slot)]
         self.amount_entries: dict[int, tk.Entry] = {}
-        self.mode_var = tk.StringVar(value="C2C 按金额" if state.mode == "c2c" else "普通汇率")
-        self.provider_var = tk.StringVar(value=PROVIDER_LABELS[state.provider])
+        self.mode_var = tk.StringVar(value=tr("C2C 按金额" if state.mode == "c2c" else "普通汇率"))
+        self.provider_var = tk.StringVar(value=tr(PROVIDER_LABELS[state.provider]))
         self.settlement_var = tk.StringVar(value=state.settlement_fiat)
-        self.payment_var = tk.StringVar(value=PAYMENT_ALL_LABEL)
-        self.quote_stamp_var = tk.StringVar(value="报价时间：等待汇率")
-        self.status_var = tk.StringVar(
-            value=(
+        self.payment_var = tk.StringVar(value=tr(PAYMENT_ALL_LABEL))
+        self._quote_stamp_source = "报价时间：等待汇率"
+        self.quote_stamp_var = tk.StringVar(value=tr(self._quote_stamp_source))
+        self._status_source = (
                 "法币与虚拟币按实际输入金额查询 C2C；虚拟币之间经所选法币执行双段参考。"
                 if state.mode == "c2c" else
                 "使用公开市场与法币参考汇率同步换算；仅供参考，不执行购买或交易。"
-            )
         )
+        self.status_var = tk.StringVar(value=tr(self._status_source))
         self.card_frame: tk.Frame | None = None
+        self._card_columns = 3
         self.card_widgets: dict[int, tk.Frame] = {}
         self.currency_selectors: dict[int, tk.Widget] = {}
         self.card_role_labels: dict[int, tk.Label] = {}
@@ -930,7 +932,7 @@ class ExchangePage(tk.Frame):
         self.card_swap_buttons: dict[int, tk.Button] = {}
         self.primary_entry: tk.Entry | None = None
         self.settlement_values: tuple[str, ...] = (state.settlement_fiat,)
-        self.payment_by_label: dict[str, str] = {PAYMENT_ALL_LABEL: ""}
+        self.payment_by_label: dict[str, str] = {tr(PAYMENT_ALL_LABEL): ""}
         self.result_bridge = _TkResultBridge(self, self._finish_quote)
         self.payment_bridge = _TkResultBridge(self, self._finish_payment_options)
         self.payment_cache: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
@@ -976,6 +978,53 @@ class ExchangePage(tk.Frame):
             takefocus=True,
         )
 
+    def _set_status(self, text: object) -> None:
+        self._status_source = str(text)
+        self.status_var.set(tr(self._status_source))
+
+    def _set_quote_stamp(self, text: object) -> None:
+        self._quote_stamp_source = str(text)
+        self.quote_stamp_var.set(tr(self._quote_stamp_source))
+
+    @staticmethod
+    def _provider_labels() -> dict[str, str]:
+        return {provider: tr(label) for provider, label in PROVIDER_LABELS.items()}
+
+    @classmethod
+    def _provider_code(cls, display: str) -> str:
+        return next(
+            (provider for provider, label in cls._provider_labels().items() if label == display),
+            "auto",
+        )
+
+    def apply_language(self) -> None:
+        provider_labels = self._provider_labels()
+        self.mode_var.set(tr("C2C 按金额" if self.state.mode == "c2c" else "普通汇率"))
+        self.provider_var.set(provider_labels.get(self.state.provider, provider_labels["auto"]))
+        if self.provider_combo is not None:
+            self.provider_combo.configure(values=tuple(provider_labels.values()))
+        self._refresh_payment_options()
+        self.status_var.set(tr(self._status_source))
+        fetched_at = str(_mapping_value(self.snapshot, "fetched_at", "") or "")
+        if fetched_at:
+            cache_label = "（缓存）" if self.from_cache else ""
+            self._set_quote_stamp(f"报价时间：{self.timestamp_formatter(fetched_at)}{cache_label}")
+        else:
+            self.quote_stamp_var.set(tr(self._quote_stamp_source))
+        rates = _mapping_value(self.snapshot, "rates", {})
+        kinds = _mapping_value(self.snapshot, "kinds", {})
+        names = _mapping_value(self.snapshot, "names", {})
+        if isinstance(rates, Mapping) and isinstance(kinds, Mapping) and isinstance(names, Mapping):
+            self.code_to_display.clear()
+            self.display_to_code.clear()
+            for code in self.currency_values:
+                kind = str(kinds.get(code, ""))
+                prefix = "₿ " if kind == "crypto" else ""
+                display = f"{prefix}{code}  ·  {localized_asset_name(code, str(names.get(code, code))[:80])}"
+                self.code_to_display[code] = display
+                self.display_to_code[display] = code
+            self._refresh_currency_selectors()
+
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
@@ -1004,7 +1053,7 @@ class ExchangePage(tk.Frame):
             for column in range(8):
                 controls.grid_columnconfigure(column, weight=1 if column in {1, 3, 5} else 0)
             tk.Label(controls, text="平台", bg=self.colors["card"], fg=self.colors["muted"], font=(self.font_name, 8, "bold")).grid(row=0, column=0, padx=(12, 6), pady=9)
-            self.provider_combo = ttk.Combobox(controls, textvariable=self.provider_var, values=tuple(PROVIDER_LABELS.values()), state="readonly", width=11, takefocus=True)
+            self.provider_combo = ttk.Combobox(controls, textvariable=self.provider_var, values=tuple(self._provider_labels().values()), state="readonly", width=11, takefocus=True)
             self.provider_combo.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=7)
             self.provider_combo.bind("<<ComboboxSelected>>", self._provider_changed)
             tk.Label(controls, text="跨币结算法币", bg=self.colors["card"], fg=self.colors["muted"], font=(self.font_name, 8, "bold")).grid(row=0, column=2, padx=(0, 6))
@@ -1012,7 +1061,7 @@ class ExchangePage(tk.Frame):
             self.settlement_combo.grid(row=0, column=3, sticky="ew", padx=(0, 10), pady=7)
             self.settlement_combo.bind("<<ComboboxSelected>>", self._settlement_changed)
             tk.Label(controls, text="结算支付", bg=self.colors["card"], fg=self.colors["muted"], font=(self.font_name, 8, "bold")).grid(row=0, column=4, padx=(0, 6))
-            self.payment_combo = ttk.Combobox(controls, textvariable=self.payment_var, values=(PAYMENT_UNKNOWN_LABEL,), state="readonly", width=25, takefocus=True)
+            self.payment_combo = ttk.Combobox(controls, textvariable=self.payment_var, values=(tr(PAYMENT_UNKNOWN_LABEL),), state="readonly", width=25, takefocus=True)
             self.payment_combo.grid(row=0, column=5, sticky="ew", padx=(0, 10), pady=7)
             self.payment_combo.bind("<<ComboboxSelected>>", self._payment_changed)
             stamp_column = 6
@@ -1042,7 +1091,7 @@ class ExchangePage(tk.Frame):
         self.card_frame = tk.Frame(self.canvas, bg=self.colors["bg"])
         self.card_window = self.canvas.create_window((0, 0), window=self.card_frame, anchor="nw")
         self.card_frame.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.card_window, width=e.width))
+        self.canvas.bind("<Configure>", self._canvas_resized, add="+")
         self.canvas.bind("<MouseWheel>", self._mousewheel, add="+")
         self._render_cards()
         self._update_control_states()
@@ -1050,6 +1099,34 @@ class ExchangePage(tk.Frame):
     def _mousewheel(self, event: tk.Event) -> str:
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
         return "break"
+
+    def _canvas_resized(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self.card_window, width=event.width)
+        columns = 3 if event.width >= 930 else 2 if event.width >= 600 else 1
+        if columns != self._card_columns:
+            self._card_columns = columns
+            self._layout_cards()
+
+    def _layout_cards(self) -> None:
+        if self.card_frame is None or not self.card_widgets:
+            return
+        columns = self._card_columns
+        for column in range(3):
+            self.card_frame.grid_columnconfigure(
+                column,
+                weight=1 if column < columns else 0,
+                uniform="exchange_cards" if column < columns else "",
+            )
+        primary = self.card_widgets.get(self.state.primary_slot)
+        if primary is not None:
+            primary.grid_configure(row=0, column=0, columnspan=columns, sticky="nsew", padx=7, pady=(0, 9))
+        for index, slot in enumerate(self.state.target_slots):
+            card = self.card_widgets.get(slot)
+            if card is not None:
+                card.grid_configure(
+                    row=1 + index // columns, column=index % columns, columnspan=1,
+                    sticky="nsew", padx=7, pady=7,
+                )
 
     def _render_cards(self) -> None:
         if self.card_frame is None or self.closed:
@@ -1075,15 +1152,12 @@ class ExchangePage(tk.Frame):
         self.card_detail_labels.clear()
         self.card_swap_buttons.clear()
         self.primary_entry = None
-        for column in range(3):
-            self.card_frame.grid_columnconfigure(column, weight=1, uniform="exchange_cards")
         primary = self._make_card(self.card_frame, self.state.primary_slot, primary=True)
         self.card_widgets[self.state.primary_slot] = primary
-        primary.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=7, pady=(0, 9))
         for index, slot in enumerate(self.state.target_slots):
             card = self._make_card(self.card_frame, slot, primary=False)
             self.card_widgets[slot] = card
-            card.grid(row=1 + index // 3, column=index % 3, sticky="nsew", padx=7, pady=7)
+        self._layout_cards()
         if focus_slot is not None and focus_slot in self.amount_entries:
             try:
                 entry = self.amount_entries[focus_slot]
@@ -1322,7 +1396,7 @@ class ExchangePage(tk.Frame):
             for code in self.currency_values:
                 kind = str(kinds.get(code, ""))
                 prefix = "₿ " if kind == "crypto" else ""
-                display = f"{prefix}{code}  ·  {str(names.get(code, code))[:80]}"
+                display = f"{prefix}{code}  ·  {localized_asset_name(code, str(names.get(code, code))[:80])}"
                 self.code_to_display[code] = display
                 self.display_to_code[display] = code
             fiats = tuple(
@@ -1339,7 +1413,7 @@ class ExchangePage(tk.Frame):
         fetched_at = str(_mapping_value(snapshot, "fetched_at", "") or "")
         if fetched_at:
             cache_label = "（缓存）" if from_cache else ""
-            self.quote_stamp_var.set(f"报价时间：{self.timestamp_formatter(fetched_at)}{cache_label}")
+            self._set_quote_stamp(f"报价时间：{self.timestamp_formatter(fetched_at)}{cache_label}")
         self.state.invalidate()
         self._clear_result_amounts()
         self.payment_generation += 1
@@ -1350,14 +1424,14 @@ class ExchangePage(tk.Frame):
             self.recalculate_now()
 
     def begin_refresh(self) -> None:
-        self.status_var.set(
+        self._set_status(
             "正在刷新普通参考汇率与 C2C 依赖数据；旧一轮结果不会覆盖新输入。"
             if self.state.mode == "c2c" else
             "正在刷新公开市场与法币参考汇率；旧一轮结果不会覆盖新输入。"
         )
 
     def finish_refresh_failure(self) -> None:
-        self.status_var.set("刷新失败；若有可信缓存仍会标明缓存状态。")
+        self._set_status("刷新失败；若有可信缓存仍会标明缓存状态。")
 
     def on_show(self) -> None:
         if self.closed:
@@ -1414,14 +1488,14 @@ class ExchangePage(tk.Frame):
         if not raw:
             self.state.set_input(selected, "")
             self._save_state()
-            self.status_var.set("请在任意一个货币金额框输入金额或算式。")
+            self._set_status("请在任意一个货币金额框输入金额或算式。")
             self._refresh_target_cards()
             return None
         try:
             amount = evaluate_basic_amount_decimal(raw)
         except CalculationError as exc:
             self.state.invalidate()
-            self.status_var.set(f"金额算式有误：{exc}")
+            self._set_status(f"金额算式有误：{exc}")
             self._refresh_target_cards()
             return None
         self.state.set_input(selected, amount)
@@ -1470,7 +1544,7 @@ class ExchangePage(tk.Frame):
         if amount is None:
             return "break"
         if self.snapshot is None:
-            self.status_var.set(f"算式结果：{amount}；等待汇率数据。")
+            self._set_status(f"算式结果：{amount}；等待汇率数据。")
             return "break"
         kinds = _mapping_value(self.snapshot, "kinds", {})
         if not isinstance(kinds, Mapping):
@@ -1515,7 +1589,7 @@ class ExchangePage(tk.Frame):
                     )
                     self.state.accept_result(waiting)
                     self._set_result_amount(waiting)
-        self.status_var.set(
+        self._set_status(
             "C2C 页面不使用普通虚拟币行情降级；法币↔虚拟币查单广告，虚拟币↔虚拟币经结算法币双段查询。"
             if self.state.mode == "c2c" else
             f"已按 {self.state.active_code} 输入同步换算其他六项；公开市场行情仅供参考。"
@@ -1566,7 +1640,7 @@ class ExchangePage(tk.Frame):
         if not self.visible or not self.state.accept_result(result):
             return
         self._set_result_amount(result)
-        self.quote_stamp_var.set(
+        self._set_quote_stamp(
             f"报价时间：{self.timestamp_formatter(datetime.now().astimezone().isoformat())}"
         )
         self._refresh_target_cards((result.slot,))
@@ -1638,7 +1712,7 @@ class ExchangePage(tk.Frame):
     def _mode_changed(self, _event: tk.Event | None = None) -> None:
         if self.fixed_mode is not None:
             return
-        mode = "c2c" if self.mode_var.get() == "C2C 按金额" else "market"
+        mode = "c2c" if self.mode_var.get() == tr("C2C 按金额") else "market"
         if self.state.set_mode(mode):
             self.payment_generation += 1
             self._refresh_payment_options()
@@ -1647,7 +1721,7 @@ class ExchangePage(tk.Frame):
             self._schedule_recalculate()
 
     def _provider_changed(self, _event: tk.Event | None = None) -> None:
-        provider = PROVIDER_BY_LABEL.get(self.provider_var.get(), "auto")
+        provider = self._provider_code(self.provider_var.get())
         if provider != self.state.provider and self.state.payment_method:
             self.state.set_payment_method("")
         if self.state.set_provider(provider):
@@ -1699,18 +1773,20 @@ class ExchangePage(tk.Frame):
         key = (self.state.provider, str(fiat or ""))
         options = self.payment_cache.get(key, ())
         if options:
-            self.payment_by_label = {PAYMENT_ALL_LABEL: ""}
+            all_label = tr(PAYMENT_ALL_LABEL)
+            self.payment_by_label = {all_label: ""}
             for identifier, name in options:
                 self.payment_by_label[f"{name} · {identifier}"] = identifier
             values = tuple(self.payment_by_label)
             selected = next(
                 (label for label, identifier in self.payment_by_label.items() if identifier == self.state.payment_method),
-                PAYMENT_ALL_LABEL,
+                all_label,
             )
         else:
-            self.payment_by_label = {PAYMENT_UNKNOWN_LABEL: ""}
-            values = (PAYMENT_UNKNOWN_LABEL,)
-            selected = PAYMENT_UNKNOWN_LABEL
+            unknown_label = tr(PAYMENT_UNKNOWN_LABEL)
+            self.payment_by_label = {unknown_label: ""}
+            values = (unknown_label,)
+            selected = unknown_label
         self.payment_combo.configure(values=values)
         self.payment_var.set(selected)
         self._update_control_states()
