@@ -113,6 +113,9 @@ $ZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot $PortableAssetName
 $InstallerScript = Assert-SafeChildPath -Path (Join-Path $ProjectDir "installer\installer.iss") -AllowedRoot $ProjectDir
 $InstallerBaseName = $ReleaseAssetStem + "-Setup"
 $InstallerPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($InstallerBaseName + ".exe")) -AllowedRoot $ReleaseRoot
+$SystemTemporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+$InstallerCompileRoot = Assert-SafeChildPath -Path (Join-Path $SystemTemporaryRoot ("YaohengInstaller-" + [guid]::NewGuid().ToString("N"))) -AllowedRoot $SystemTemporaryRoot
+$CompiledInstallerPath = Assert-SafeChildPath -Path (Join-Path $InstallerCompileRoot ($InstallerBaseName + ".exe")) -AllowedRoot $InstallerCompileRoot
 $LegacyZipPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot ($AppName + "-绿色免安装版.zip")) -AllowedRoot $ReleaseRoot
 $ManagedReleaseAssetNamePattern = "^(?:Yaoheng-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-(?:Setup\.exe|Portable\.zip)|" + [regex]::Escape($AppName) + "-[0-9]+(?:\.[0-9]+){1,3}-Windows-x64-安装版\.exe)$"
 $ChecksumManifestPath = Assert-SafeChildPath -Path (Join-Path $ReleaseRoot "SHA256SUMS.txt") -AllowedRoot $ReleaseRoot
@@ -329,13 +332,20 @@ try {
     if (Test-Path -LiteralPath $InstallerPath) {
         Remove-Item -LiteralPath $InstallerPath -Force
     }
-    & $InnoCompilerPath "/Qp" "/O$ReleaseRoot" "/F$InstallerBaseName" "/DAppVersion=$AppVersion" $InstallerScript
+    # Compile into a unique temporary directory first. Windows security tools can
+    # briefly lock a newly created executable in the public release folder while
+    # Inno is still updating its resources, causing EndUpdateResource error 110.
+    # Publishing only the completed file also prevents a partial installer from
+    # ever appearing beside the verified release assets.
+    [System.IO.Directory]::CreateDirectory($InstallerCompileRoot) | Out-Null
+    & $InnoCompilerPath "/Qp" "/O$InstallerCompileRoot" "/F$InstallerBaseName" "/DAppVersion=$AppVersion" $InstallerScript
     if ($LASTEXITCODE -ne 0) {
         throw "Windows installer build failed (exit code $LASTEXITCODE)"
     }
-    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
-        throw "Inno Setup did not create the expected installer: $InstallerPath"
+    if (-not (Test-Path -LiteralPath $CompiledInstallerPath -PathType Leaf)) {
+        throw "Inno Setup did not create the expected staged installer: $CompiledInstallerPath"
     }
+    Copy-Item -LiteralPath $CompiledInstallerPath -Destination $InstallerPath -Force
     $InstallerAuditArguments = @(
         $ReleaseChecksScript, "verify-binary",
         "--path", $InstallerPath
@@ -361,4 +371,8 @@ try {
 }
 finally {
     Pop-Location
+    if (Test-Path -LiteralPath $InstallerCompileRoot -PathType Container) {
+        $InstallerCompileRoot = Assert-SafeChildPath -Path $InstallerCompileRoot -AllowedRoot $SystemTemporaryRoot
+        Remove-Item -LiteralPath $InstallerCompileRoot -Recurse -Force
+    }
 }
