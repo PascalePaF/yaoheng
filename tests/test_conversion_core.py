@@ -104,7 +104,7 @@ class ExactRateServiceTests(unittest.TestCase):
             self.assertEqual(service.convert(0.1, "USD", "THREE"), 0.3)
             self.assertTrue(all(isinstance(value, str) for value in service.get_rate_strings().values()))
             self.assertEqual(service.session.headers["User-Agent"], APP_USER_AGENT)
-            self.assertEqual(APP_VERSION, "3.20.1")
+            self.assertEqual(APP_VERSION, "3.20.2")
 
     def test_empty_exact_snapshot_is_safe_and_immutable(self):
         with tempfile.TemporaryDirectory() as directory:

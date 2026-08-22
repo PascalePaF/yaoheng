@@ -33,15 +33,22 @@ jobs:
       - name: Check PowerShell syntax
         shell: pwsh
         run: |
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path "build.ps1"),
-            [ref] $tokens,
-            [ref] $parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count) {
-            $parseErrors | ForEach-Object { Write-Error $_.Message }
+          $failed = $false
+          foreach ($script in (git ls-files -- "*.ps1")) {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref] $tokens,
+              [ref] $parseErrors
+            ) | Out-Null
+            if ($parseErrors.Count) {
+              Write-Error "PowerShell syntax failed: $script"
+              $parseErrors | ForEach-Object { Write-Error $_.Message }
+              $failed = $true
+            }
+          }
+          if ($failed) {
             exit 1
           }
       - name: Check Python syntax

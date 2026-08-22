@@ -9,9 +9,10 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 import requests
@@ -26,6 +27,9 @@ MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_CHECKSUM_BYTES = 64 * 1024
 MAX_INSTALLER_BYTES = 200 * 1024 * 1024
 MIN_INSTALLER_BYTES = 1 * 1024 * 1024
+DEFAULT_RETRY_ATTEMPTS = 3
+MAX_RETRY_AFTER_SECONDS = 5.0
+_RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
 _VERSION_RE = re.compile(r"v?(\d{1,4}(?:\.\d{1,4}){1,3})\Z", re.IGNORECASE)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _DOWNLOAD_HOSTS = frozenset(
@@ -227,8 +231,16 @@ def _asset_size(asset: Mapping[str, Any], *, minimum: int, maximum: int) -> int:
 class GitHubUpdateService:
     """Check, download, verify and launch the published Windows installer."""
 
-    def __init__(self, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        session: requests.Session | None = None,
+        *,
+        retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.session = session or requests.Session()
+        self.retry_attempts = max(1, min(5, int(retry_attempts)))
+        self._sleep = sleep
         self.session.headers.update(
             {
                 "User-Agent": APP_USER_AGENT,
@@ -237,26 +249,149 @@ class GitHubUpdateService:
             }
         )
 
-    def _get(self, url: str, *, timeout: tuple[float, float]) -> requests.Response:
+    @staticmethod
+    def _status_code(
+        response: requests.Response | None,
+        error: requests.RequestException | None = None,
+    ) -> int | None:
+        candidate = response or getattr(error, "response", None)
+        value = getattr(candidate, "status_code", None)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    @classmethod
+    def _retryable(
+        cls,
+        error: requests.RequestException,
+        response: requests.Response | None,
+    ) -> bool:
+        status = cls._status_code(response, error)
+        return (
+            status in _RETRYABLE_HTTP_STATUS
+            or isinstance(
+                error,
+                (
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _retry_delay(response: requests.Response | None, attempt: int) -> float:
+        retry_after = ""
+        if response is not None:
+            retry_after = str(response.headers.get("Retry-After", "") or "").strip()
+        try:
+            requested = float(retry_after)
+        except (TypeError, ValueError):
+            requested = 0.0
+        if requested > 0:
+            return min(requested, MAX_RETRY_AFTER_SECONDS)
+        return min(0.35 * (2 ** max(0, attempt - 1)), 1.5)
+
+    def _proxy_endpoint(self, url: str) -> str:
+        """Return a credential-free proxy endpoint for actionable diagnostics."""
+
+        proxies: dict[str, str] = {}
+        configured = getattr(self.session, "proxies", None)
+        if isinstance(configured, Mapping):
+            proxies.update({str(key): str(value) for key, value in configured.items()})
+        if getattr(self.session, "trust_env", True):
+            try:
+                environment = requests.utils.get_environ_proxies(url)
+            except (AttributeError, OSError, ValueError):
+                environment = {}
+            for key, value in environment.items():
+                proxies.setdefault(str(key), str(value))
+        try:
+            proxy = requests.utils.select_proxy(url, proxies)
+        except (AttributeError, TypeError, ValueError):
+            proxy = None
+        if not proxy:
+            return ""
+        parsed = urlparse(str(proxy) if "://" in str(proxy) else f"http://{proxy}")
+        host = parsed.hostname
+        if not host:
+            return ""
+        port = parsed.port
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{host}:{port}" if port is not None else host
+
+    def _connection_error(
+        self,
+        url: str,
+        error: requests.RequestException,
+        attempts: int,
+        *,
+        downloading: bool = False,
+    ) -> UpdateError:
+        status = self._status_code(None, error)
+        attempt_text = f"，已尝试 {attempts} 次" if attempts > 1 else ""
+        if status == 404:
+            return UpdateError("GitHub 未找到正式发布信息（HTTP 404），请稍后重试")
+        if status in {403, 429}:
+            return UpdateError(f"GitHub 暂时限制了更新请求（HTTP {status}{attempt_text}），请稍后重试")
+        if status is not None and status >= 500:
+            return UpdateError(f"GitHub 服务暂时不可用（HTTP {status}{attempt_text}），请稍后重试")
+        prefix = "安装包下载中断" if downloading else "无法连接 GitHub"
+        proxy = self._proxy_endpoint(url)
+        if proxy:
+            return UpdateError(
+                f"{prefix}（代理 {proxy} 连接失败{attempt_text}），请检查代理状态或稍后重试"
+            )
+        if isinstance(error, requests.exceptions.SSLError):
+            return UpdateError(f"{prefix}（安全连接失败{attempt_text}），请检查系统时间和网络后重试")
+        return UpdateError(f"{prefix}（网络请求失败{attempt_text}），请检查网络后重试")
+
+    def _request_once(self, url: str, *, timeout: tuple[float, float]) -> requests.Response:
         response: requests.Response | None = None
         try:
             response = self.session.get(url, timeout=timeout, stream=True, allow_redirects=True)
             response.raise_for_status()
-        except requests.RequestException as exc:
+            return response
+        except requests.RequestException:
             if response is not None:
                 response.close()
-            raise UpdateError("无法连接 GitHub，请检查网络后重试") from exc
-        return response
+            raise
+
+    def _read_url(
+        self,
+        url: str,
+        *,
+        timeout: tuple[float, float],
+        maximum: int,
+        validate_url: Callable[[str], object],
+    ) -> bytes:
+        for attempt in range(1, self.retry_attempts + 1):
+            response: requests.Response | None = None
+            try:
+                response = self._request_once(url, timeout=timeout)
+                validate_url(response.url)
+                return _read_limited(response, maximum)
+            except UpdateSecurityError:
+                raise
+            except requests.RequestException as exc:
+                retry_response = response or getattr(exc, "response", None)
+                if attempt < self.retry_attempts and self._retryable(exc, retry_response):
+                    self._sleep(self._retry_delay(retry_response, attempt))
+                    continue
+                raise self._connection_error(url, exc, attempt) from exc
+            finally:
+                if response is not None:
+                    response.close()
+        raise AssertionError("unreachable update read retry state")
 
     def _read_checksum(self, asset: Mapping[str, Any], installer_name: str) -> str:
         _asset_size(asset, minimum=32, maximum=MAX_CHECKSUM_BYTES)
         initial_url = _validate_asset_url(asset.get("browser_download_url"))
-        response = self._get(initial_url, timeout=(5.0, 12.0))
-        try:
-            _validate_asset_url(response.url, redirected=True)
-            payload = _read_limited(response, MAX_CHECKSUM_BYTES)
-        finally:
-            response.close()
+        payload = self._read_url(
+            initial_url,
+            timeout=(5.0, 12.0),
+            maximum=MAX_CHECKSUM_BYTES,
+            validate_url=lambda value: _validate_asset_url(value, redirected=True),
+        )
         try:
             text = payload.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
@@ -271,12 +406,12 @@ class GitHubUpdateService:
         return matches[0]
 
     def check(self, current_version: str = APP_VERSION) -> UpdateInfo:
-        response = self._get(LATEST_RELEASE_API, timeout=(5.0, 12.0))
-        try:
-            _validate_api_url(response.url)
-            payload_bytes = _read_limited(response, MAX_METADATA_BYTES)
-        finally:
-            response.close()
+        payload_bytes = self._read_url(
+            LATEST_RELEASE_API,
+            timeout=(5.0, 12.0),
+            maximum=MAX_METADATA_BYTES,
+            validate_url=_validate_api_url,
+        )
         try:
             payload = json.loads(
                 payload_bytes.decode("utf-8"),
@@ -351,43 +486,57 @@ class GitHubUpdateService:
             if existing_hash == asset.sha256:
                 return DownloadedUpdate(info, target, existing_hash)
 
-        response = self._get(asset.url, timeout=(5.0, 45.0))
-        digest = hashlib.sha256()
-        written = 0
-        try:
-            _validate_asset_url(response.url, redirected=True)
+        actual_hash = ""
+        for attempt in range(1, self.retry_attempts + 1):
+            response: requests.Response | None = None
+            digest = hashlib.sha256()
+            written = 0
             try:
-                declared = int(response.headers.get("Content-Length", "0") or 0)
-            except (TypeError, ValueError):
-                declared = 0
-            if declared and declared != asset.size:
-                raise UpdateSecurityError("下载文件大小与 GitHub Release 不一致")
-            with partial.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=256 * 1024):
-                    if not chunk:
-                        continue
-                    written += len(chunk)
-                    if written > asset.size or written > MAX_INSTALLER_BYTES:
-                        raise UpdateSecurityError("下载文件超过声明大小")
-                    digest.update(chunk)
-                    handle.write(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except requests.RequestException as exc:
-            partial.unlink(missing_ok=True)
-            raise UpdateError("安装包下载中断，请检查网络后重试") from exc
-        except OSError as exc:
-            partial.unlink(missing_ok=True)
-            raise UpdateError("无法保存更新安装包") from exc
-        except Exception:
-            partial.unlink(missing_ok=True)
-            raise
-        finally:
-            response.close()
-        actual_hash = digest.hexdigest()
-        if written != asset.size or actual_hash != asset.sha256:
-            partial.unlink(missing_ok=True)
-            raise UpdateSecurityError("安装包 SHA-256 校验失败，文件已丢弃")
+                response = self._request_once(asset.url, timeout=(5.0, 45.0))
+                _validate_asset_url(response.url, redirected=True)
+                try:
+                    declared = int(response.headers.get("Content-Length", "0") or 0)
+                except (TypeError, ValueError):
+                    declared = 0
+                if declared and declared != asset.size:
+                    raise UpdateSecurityError("下载文件大小与 GitHub Release 不一致")
+                with partial.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=256 * 1024):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > asset.size or written > MAX_INSTALLER_BYTES:
+                            raise UpdateSecurityError("下载文件超过声明大小")
+                        digest.update(chunk)
+                        handle.write(chunk)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except requests.RequestException as exc:
+                partial.unlink(missing_ok=True)
+                retry_response = response or getattr(exc, "response", None)
+                if attempt < self.retry_attempts and self._retryable(exc, retry_response):
+                    self._sleep(self._retry_delay(retry_response, attempt))
+                    continue
+                raise self._connection_error(
+                    asset.url,
+                    exc,
+                    attempt,
+                    downloading=True,
+                ) from exc
+            except OSError as exc:
+                partial.unlink(missing_ok=True)
+                raise UpdateError("无法保存更新安装包") from exc
+            except Exception:
+                partial.unlink(missing_ok=True)
+                raise
+            finally:
+                if response is not None:
+                    response.close()
+            actual_hash = digest.hexdigest()
+            if written != asset.size or actual_hash != asset.sha256:
+                partial.unlink(missing_ok=True)
+                raise UpdateSecurityError("安装包 SHA-256 校验失败，文件已丢弃")
+            break
         try:
             os.replace(partial, target)
         except OSError as exc:

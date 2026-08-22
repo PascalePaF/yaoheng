@@ -17,7 +17,7 @@
 
 ## 简介
 
-曜衡 3.20.1 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持从官方 GitHub Release 检查和覆盖升级。
+曜衡 3.20.2 把日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持容错检查官方 GitHub Release 和覆盖升级。
 
 应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-3.20.1-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
-| 绿色免安装版 | `Yaoheng-3.20.1-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| Windows 安装版（推荐） | `Yaoheng-3.20.2-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-3.20.2-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
 | 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
 系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
@@ -36,8 +36,8 @@
 > 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.1-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.1-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.2-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.2-Windows-x64-Portable.zip"
 ```
 
 ## 功能
@@ -51,9 +51,9 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.20.1-Windows-x64-Portable.zip"
 | 虚拟币换算 | 法币与虚拟币三端自由组合，可切换普通汇率或 C2C 按金额 |
 | 行情趋势 | 法币/虚拟币整表、计价币、参考数额、搜索排序及 1/7/30/90 日趋势 |
 | 本机 API | 默认关闭，仅 `127.0.0.1`；计算、换算、命令和能力查询，为未来机器人接入预留 |
-| 软件更新 | 在设置页检查官方 GitHub Release，校验附件大小和 SHA-256 后启动覆盖升级 |
-| 外观主题 | 28 套低刺激深浅主题即时切换，避免纯黑/纯白大面积背景，保持相同布局和字号 |
-| 可靠性 | 十进制精确换算、响应校验、并发合并、原子缓存/设置、备份恢复和旧结果隔离 |
+| 软件更新 | 有限重试官方 GitHub Release 请求，校验附件大小和 SHA-256 后启动覆盖升级；代理错误信息自动脱敏 |
+| 外观主题 | 28 套低饱和深色主题即时切换，分层表面避免纯黑背景，保持相同布局和字号 |
+| 可靠性 | Windows 单实例与重复启动唤醒、可选关闭行为、十进制换算、响应校验、原子缓存/设置和旧结果隔离 |
 
 ## 七币种兑换
 
@@ -88,9 +88,13 @@ C2C 兑换、市场兑换、货币、虚拟币和两个行情页会分别保存�
 
 ## 软件更新与覆盖升级
 
-设置页可手动检查曜衡官方 GitHub 仓库的最新正式 Release。发现新版本后，曜衡只接受固定命名的 Windows 安装包和 `SHA256SUMS.txt`，下载完成后同时核对附件大小与 SHA-256；校验失败的临时文件会被丢弃，不会启动。
+设置页可手动检查曜衡官方 GitHub 仓库的最新正式 Release。检查、校验文件或安装包传输遇到短时超时、连接重置、限流和 GitHub 服务异常时会有限退避重试；安装包中断后会丢弃半成品并从头原子重下。最终错误会区分 GitHub、TLS、网络和代理故障，代理账号与密码不会显示。
+
+发现新版本后，曜衡只接受固定命名的 Windows 安装包和 `SHA256SUMS.txt`，下载完成后同时核对附件大小与 SHA-256；地址、大小或校验失败的临时文件会被丢弃，不会启动。网络重试不会放宽这些安全边界。
 
 安装版使用稳定的应用标识识别旧版本，并默认沿用原安装目录、开始菜单组和快捷方式选择。升级前会替换旧运行文件，同时保留 `app_settings*.json`、`private/` 和 `data/` 中的设置、收藏、历史、缓存与本机 API 校验材料。绿色版若使用应用内升级，会通过安装器覆盖当前目录并登记为安装版；如需继续保持纯绿色方式，请手动下载新版 ZIP。
+
+曜衡使用 Windows 命名互斥保证同时只运行一个窗口。重复点击快捷方式或 EXE 会唤醒、恢复并置前已经运行的窗口。设置页可单独选择点击标题栏 `×` 时最小化到任务栏或彻底退出；设置页“立即退出”和覆盖升级不受最小化选项影响。
 
 ## 本机 API 与机器人接入
 
@@ -152,9 +156,15 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
 - `release\曜衡\曜衡.exe`
-- `release\Yaoheng-3.20.1-Windows-x64-Portable.zip`
-- `release\Yaoheng-3.20.1-Windows-x64-Setup.exe`
+- `release\Yaoheng-3.20.2-Windows-x64-Portable.zip`
+- `release\Yaoheng-3.20.2-Windows-x64-Setup.exe`
 - `release\SHA256SUMS.txt`
+
+发布前可在随机系统临时目录复验覆盖升级、用户数据保留和打包后单实例；测试使用独立安装身份，不会改动真实曜衡安装：
+
+```powershell
+.\tools\smoke_upgrade.ps1 -PreviousVersion 3.20.1
+```
 
 ## 项目结构
 
@@ -169,6 +179,7 @@ c2c/                     Binance/OKX 只读 C2C 层
 command_service.py       机器人命令解析与执行
 local_api.py             仅本机 HTTP API
 secret_store.py          一次性令牌校验材料
+single_instance.py       Windows 单实例与重复启动唤醒
 update_service.py        GitHub Release 更新检查、下载与校验
 settings_service.py      设置、迁移与数据目录
 tests/                   离线自动化回归测试

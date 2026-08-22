@@ -172,6 +172,7 @@ class ReleaseChecksTests(unittest.TestCase):
             "command_service.py",
             "local_api.py",
             "secret_store.py",
+            "single_instance.py",
             "update_service.py",
             "c2c",
         ):

@@ -3052,7 +3052,10 @@ class SettingsPage(tk.Frame):
         "calculator": "计算器", "exchange": "C2C 兑换", "market_exchange": "市场兑换", "fiat": "货币", "fiat_market": "货币行情趋势",
         "crypto": "虚拟币", "market": "虚拟币行情趋势", "settings": "设置",
     }
-    CLOSE_LABELS = {"exit": "关闭时退出应用", "minimize": "关闭时最小化"}
+    CLOSE_LABELS = {
+        "minimize": "点击 × 时最小化到任务栏",
+        "exit": "点击 × 时彻底退出软件",
+    }
     MODE_LABELS = {"standard": "标准模式", "professional": "专业模式"}
     COPY_LABELS = {"number": "纯数字", "grouped": "带千位分隔符", "formula": "完整算式与结果"}
 
@@ -3237,7 +3240,7 @@ class SettingsPage(tk.Frame):
         self._number_field(intervals, "虚拟币", self.crypto_minutes_var, "crypto_refresh_minutes", 1, 1440, 10).pack(side="left", expand=True, fill="x", padx=(5, 0))
         self._check(refresh_card, "最小化后继续按设定时间刷新", self.refresh_minimized_var, "refresh_when_minimized", pady=(2, 16))
 
-        startup = self._card(body, "启动与关闭", "默认页面、窗口记忆与关闭按钮行为", 1, 1)
+        startup = self._card(body, "启动与关闭", "曜衡只运行一个窗口；重复启动会唤醒现有窗口", 1, 1)
         self._select_row(startup, "默认启动页面", self.startup_page_var, list(self.PAGE_LABELS.values()), lambda value: self._save("startup_page", self._reverse(self.PAGE_LABELS, value)))
         self._select_row(startup, "点击关闭按钮", self.close_action_var, list(self.CLOSE_LABELS.values()), lambda value: self._save("close_action", self._reverse(self.CLOSE_LABELS, value)))
         self._check(startup, "记住上次打开的页面", self.remember_page_var, "remember_last_page")
@@ -4527,6 +4530,28 @@ class YaohengApp:
             return
         self.force_exit()
 
+    def restore_window(self) -> None:
+        """Restore and foreground the existing window after a repeated launch."""
+
+        if self.exiting:
+            return
+        try:
+            if self.root.state() in {"iconic", "withdrawn"}:
+                self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+
+            def clear_topmost() -> None:
+                try:
+                    self.root.attributes("-topmost", False)
+                except (RuntimeError, tk.TclError):
+                    pass
+
+            self.root.after_idle(clear_topmost)
+            self.root.focus_force()
+        except (RuntimeError, tk.TclError):
+            return
+
     def force_exit(self) -> None:
         if self.exiting:
             return
@@ -4679,7 +4704,7 @@ class YaohengApp:
             if option in {"foreground", "activeforeground", "selectforeground", "disabledforeground"}:
                 if "on_accent" in candidates:
                     return "on_accent"
-            if hasattr(self, "sidebar") and belongs_to(widget, self.sidebar) and "sidebar" in candidates:
+            if "sidebar" in candidates and hasattr(self, "sidebar") and belongs_to(widget, self.sidebar):
                 return "sidebar"
             if "card" in candidates:
                 return "card"
@@ -4692,21 +4717,29 @@ class YaohengApp:
             "selectcolor", "disabledforeground",
         )
 
+        supported_options: dict[type[object], tuple[str, ...]] = {}
+        themed_selects: list[SearchSelect] = []
+
         def recolor(widget: tk.Misc) -> None:
+            if isinstance(widget, SearchSelect):
+                themed_selects.append(widget)
             changes: dict[str, str] = {}
-            try:
-                configuration = widget.configure()
-            except (tk.TclError, TypeError):
-                configuration = {}
-            for option in color_options:
-                if option not in configuration:
-                    continue
+            widget_type = type(widget)
+            options = supported_options.get(widget_type)
+            if options is None:
                 try:
-                    current = str(configuration[option][-1])
+                    configuration = widget.configure()
+                except (tk.TclError, TypeError):
+                    configuration = {}
+                options = tuple(option for option in color_options if option in configuration)
+                supported_options[widget_type] = options
+            for option in options:
+                try:
+                    current = str(widget.cget(option))
                     key = theme_key(widget, option, current)
                     if key and key in COLORS:
                         changes[option] = COLORS[key]
-                except (IndexError, TypeError):
+                except (tk.TclError, TypeError):
                     continue
             if changes:
                 try:
@@ -4721,13 +4754,8 @@ class YaohengApp:
         self._styles()
         self._draw_logo()
 
-        def retheme_selects(widget: tk.Misc) -> None:
-            if isinstance(widget, SearchSelect):
-                widget.apply_theme()
-            for child in widget.winfo_children():
-                retheme_selects(child)
-
-        retheme_selects(self.root)
+        for select in themed_selects:
+            select.apply_theme()
         for key in ("fiat", "crypto"):
             page = self.pages.get(key)
             if isinstance(page, DualConverterPage):
