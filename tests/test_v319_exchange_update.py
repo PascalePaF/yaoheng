@@ -281,7 +281,9 @@ class ExchangePageV319TkTests(unittest.TestCase):
     def test_primary_row_search_select_keyboard_and_formula_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "app_settings.json")
-            store.save(AppSettings(data_dir=directory, auto_refresh_enabled=False))
+            settings = AppSettings(data_dir=directory, auto_refresh_enabled=False)
+            settings.pages["exchange"]["provider"] = "okx"
+            store.save(settings)
             app: YaohengApp | None = None
             try:
                 with patch("app_ui.SettingsStore", return_value=store):

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "theme": "dark",
   "timezone": "Asia/Tokyo",
   "data_dir": "",
@@ -39,10 +39,30 @@
         "USDT"
       ],
       "primary_slot": 0,
+      "active_slot": 0,
+      "amount": "1",
+      "mode": "c2c",
+      "provider": "auto",
+      "payment_method": "",
+      "settlement_fiat": "CNY"
+    },
+    "market_exchange": {
+      "currencies": [
+        "CNY",
+        "USD",
+        "EUR",
+        "JPY",
+        "HKD",
+        "BTC",
+        "USDT"
+      ],
+      "primary_slot": 0,
+      "active_slot": 0,
       "amount": "1",
       "mode": "market",
       "provider": "auto",
-      "payment_method": ""
+      "payment_method": "",
+      "settlement_fiat": "CNY"
     },
     "calculator": {
       "default_mode": "standard",
@@ -60,7 +80,7 @@
       "active_side": "a",
       "table_base": "CNY",
       "reference_amount": "1",
-      "mode": "market",
+      "mode": "c2c",
       "provider": "auto",
       "payment_method": "",
       "favorites": [],

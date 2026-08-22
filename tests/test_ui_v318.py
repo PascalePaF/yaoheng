@@ -164,12 +164,18 @@ class FullWindowLifecycleSmokeTests(unittest.TestCase):
     def test_exchange_crypto_and_settings_pages_share_one_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
             store = SettingsStore(Path(directory) / "app_settings.json")
-            store.save(AppSettings(
+            settings = AppSettings(
                 keep_data_with_app=False,
                 data_dir=directory,
                 auto_refresh_enabled=False,
                 remember_window_geometry=False,
-            ))
+            )
+            # Keep this lifecycle smoke test fully offline.  OKX stays fail-closed
+            # until an approved merchant API contract is configured, so showing
+            # the C2C pages cannot leave real HTTP workers behind after Tk exits.
+            settings.pages["exchange"]["provider"] = "okx"
+            settings.pages["crypto"]["provider"] = "okx"
+            store.save(settings)
             app: YaohengApp | None = None
             try:
                 with patch("app_ui.SettingsStore", return_value=store):

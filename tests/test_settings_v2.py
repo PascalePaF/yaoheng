@@ -106,7 +106,10 @@ class SettingsMigrationV2Tests(unittest.TestCase):
             recovered = store.load()
 
             self.assertEqual(recovered.theme, "light")
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 2)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["schema_version"],
+                SETTINGS_SCHEMA_VERSION,
+            )
 
     def test_future_schema_is_loaded_safely_but_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,7 +133,10 @@ class SettingsMigrationV2Tests(unittest.TestCase):
     def test_save_detects_future_schema_even_without_a_prior_load(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "app_settings.json"
-            original = json.dumps({"schema_version": 3, "theme": "light"}).encode("utf-8")
+            original = json.dumps({
+                "schema_version": SETTINGS_SCHEMA_VERSION + 1,
+                "theme": "light",
+            }).encode("utf-8")
             path.write_bytes(original)
 
             self.assertFalse(SettingsStore(path).save(AppSettings(theme="dark")))
@@ -139,13 +145,17 @@ class SettingsMigrationV2Tests(unittest.TestCase):
 
 class SettingsPartitionAndPrivacyTests(unittest.TestCase):
     def test_exchange_defaults_have_seven_unique_currencies_and_one_primary_slot(self):
-        exchange = AppSettings().pages["exchange"]
+        pages = AppSettings().pages
+        exchange = pages["exchange"]
         self.assertEqual(tuple(exchange["currencies"]), DEFAULT_EXCHANGE_CURRENCIES)
         self.assertEqual(len(set(exchange["currencies"])), 7)
         self.assertIsInstance(exchange["primary_slot"], int)
         self.assertEqual(exchange["primary_slot"], 0)
         self.assertIsInstance(exchange["amount"], str)
-        self.assertEqual(exchange["mode"], "market")
+        self.assertEqual(exchange["mode"], "c2c")
+        self.assertEqual(exchange["active_slot"], 0)
+        self.assertEqual(exchange["settlement_fiat"], "CNY")
+        self.assertEqual(pages["market_exchange"]["mode"], "market")
         self.assertEqual(exchange["provider"], "auto")
 
     def test_one_corrupt_page_resets_only_that_page(self):
@@ -314,7 +324,7 @@ class SettingsPartitionAndPrivacyTests(unittest.TestCase):
         settings = SettingsStore.from_payload(payload)
         encoded = json.dumps(payload).casefold()
 
-        self.assertEqual(settings.schema_version, 2)
+        self.assertEqual(settings.schema_version, SETTINGS_SCHEMA_VERSION)
         self.assertEqual(settings.local_api["host"], LOCAL_API_LOOPBACK)
         self.assertNotIn("token", encoded)
         self.assertNotIn("merchant", encoded)

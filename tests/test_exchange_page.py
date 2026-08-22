@@ -6,6 +6,7 @@ import unittest
 from c2c.models import DataState, Direction, QuoteResult, QuoteStatus
 from conversion_core import DecimalConversionEngine
 from exchange_page import (
+    C2CBridgeJob,
     C2CQuoteJob,
     DEFAULT_EXCHANGE_CURRENCIES,
     ExchangeCoordinator,
@@ -128,16 +129,18 @@ class ExchangePageStateTests(unittest.TestCase):
         self.assertEqual(state.generation, 1)
         self.assertEqual(state.results, {})
 
-    def test_set_primary_without_a_usable_result_clears_the_input(self):
+    def test_set_primary_only_changes_layout_and_preserves_current_input(self):
         state = ExchangePageState(amount="123.45")
         self.assertTrue(state.accept_result(make_edge_result(state, 3, exact=None)))
 
         change = state.set_primary(3)
 
-        self.assertTrue(change.amount_cleared)
+        self.assertFalse(change.amount_cleared)
         self.assertEqual(state.primary_slot, 3)
         self.assertEqual(state.primary_code, "JPY")
-        self.assertEqual(state.amount, "")
+        self.assertEqual(state.active_slot, 0)
+        self.assertEqual(state.active_code, "CNY")
+        self.assertEqual(state.amount, "123.45")
         self.assertEqual(state.results, {})
 
     def test_swap_uses_the_exact_unrounded_result_as_the_new_input(self):
@@ -189,7 +192,10 @@ class ExchangePageStateTests(unittest.TestCase):
 
         self.assertEqual(
             set(payload),
-            {"currencies", "primary_slot", "amount", "mode", "provider", "payment_method"},
+            {
+                "currencies", "primary_slot", "active_slot", "amount", "mode",
+                "provider", "payment_method", "settlement_fiat",
+            },
         )
         self.assertNotIn("results", payload)
         self.assertNotIn("generation", payload)
@@ -230,12 +236,17 @@ class ExchangeCoordinatorRoutingTests(unittest.TestCase):
 
         reverse_immediate, reverse_jobs = coordinator.quote_edges(crypto_source, KINDS)
 
-        self.assertEqual({result.slot for result in reverse_immediate}, {6})
-        self.assertEqual(reverse_immediate[0].target, "USDT")
-        self.assertEqual({job.slot for job in reverse_jobs}, {0, 1, 2, 3, 4})
-        self.assertTrue(all(job.request.direction is Direction.SELL for job in reverse_jobs))
-        self.assertTrue(all(job.request.asset == "BTC" for job in reverse_jobs))
-        self.assertEqual({job.request.fiat for job in reverse_jobs}, {"CNY", "USD", "EUR", "JPY", "HKD"})
+        self.assertEqual(reverse_immediate, ())
+        direct_jobs = [job for job in reverse_jobs if isinstance(job, C2CQuoteJob)]
+        bridge_jobs = [job for job in reverse_jobs if isinstance(job, C2CBridgeJob)]
+        self.assertEqual({job.slot for job in direct_jobs}, {0, 1, 2, 3, 4})
+        self.assertTrue(all(job.request.direction is Direction.SELL for job in direct_jobs))
+        self.assertTrue(all(job.request.asset == "BTC" for job in direct_jobs))
+        self.assertEqual({job.request.fiat for job in direct_jobs}, {"CNY", "USD", "EUR", "JPY", "HKD"})
+        self.assertEqual(len(bridge_jobs), 1)
+        self.assertEqual(bridge_jobs[0].slot, 6)
+        self.assertEqual(bridge_jobs[0].settlement_fiat, "CNY")
+        self.assertFalse(bridge_jobs[0].sell_request.allow_market_fallback)
 
     def test_market_mode_maps_all_six_exact_edges_to_live_or_cache_state(self):
         coordinator = make_coordinator()

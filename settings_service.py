@@ -1,4 +1,4 @@
-"""Portable, additive schema-v2 settings for Aurora Balance (曜衡)."""
+"""Portable, additive schema-v3 settings for Aurora Balance (曜衡)."""
 
 from __future__ import annotations
 
@@ -45,10 +45,10 @@ CONVERSION_HISTORY_RETENTION_DAYS = 30
 LOCAL_API_DEFAULT_PORT = 17890
 LOCAL_API_LOOPBACK = "127.0.0.1"
 CURRENT_PAGE_NAMES = (
-    "exchange", "calculator", "fiat", "fiat_market", "crypto", "market", "settings",
+    "exchange", "market_exchange", "calculator", "fiat", "fiat_market", "crypto", "market", "settings",
 )
 LEGACY_NAVIGATION_PAGES = frozenset(
-    {"calculator", "exchange", "fiat", "fiat_market", "crypto", "market", "settings"}
+    {"calculator", "exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market", "settings"}
 )
 
 _SETTINGS_LOCKS_GUARD = threading.Lock()
@@ -87,14 +87,16 @@ def timezone_names() -> list[str]:
     return list(_cached_timezone_names())
 
 
-def _default_exchange_page() -> dict[str, Any]:
+def _default_exchange_page(mode: str = "c2c") -> dict[str, Any]:
     return {
         "currencies": list(DEFAULT_EXCHANGE_CURRENCIES),
         "primary_slot": 0,
+        "active_slot": 0,
         "amount": "1",
-        "mode": "market",
+        "mode": mode,
         "provider": "auto",
         "payment_method": "",
+        "settlement_fiat": "CNY",
     }
 
 
@@ -117,7 +119,8 @@ def _default_local_api() -> dict[str, Any]:
 
 def _default_pages() -> dict[str, dict[str, Any]]:
     return {
-        "exchange": _default_exchange_page(),
+        "exchange": _default_exchange_page("c2c"),
+        "market_exchange": _default_exchange_page("market"),
         "calculator": {
             "default_mode": "standard",
             "remember_mode": True,
@@ -128,9 +131,28 @@ def _default_pages() -> dict[str, dict[str, Any]]:
             "history": [],
             "copy_result_format": "number",
         },
-        "fiat": {"favorites": [], "pinned": []},
+        "fiat": {
+            "currencies": ["CNY", "USD", "EUR"],
+            "amounts": ["1000", "", ""],
+            "active_side": "a",
+            "table_base": "CNY",
+            "reference_amount": "1",
+            "favorites": [],
+            "pinned": [],
+        },
         "fiat_market": {},
-        "crypto": {"favorites": [], "pinned": []},
+        "crypto": {
+            "currencies": ["CNY", "BTC", "ETH"],
+            "amounts": ["10000", "", ""],
+            "active_side": "a",
+            "table_base": "CNY",
+            "reference_amount": "1",
+            "mode": "c2c",
+            "provider": "auto",
+            "payment_method": "",
+            "favorites": [],
+            "pinned": [],
+        },
         "market": {},
         "settings": {},
     }
@@ -168,7 +190,7 @@ class AppSettings:
     favorite_cryptos: list[str] = field(default_factory=list)
     pinned_cryptos: list[str] = field(default_factory=list)
 
-    # Schema-v2 additions.
+    # Versioned page partitions and service settings.
     schema_version: int = SETTINGS_SCHEMA_VERSION
     pages: dict[str, dict[str, Any]] = field(default_factory=_default_pages)
     conversion_history: dict[str, Any] = field(default_factory=_default_conversion_history)
@@ -290,8 +312,8 @@ def _legacy_page_state(settings: AppSettings) -> dict[str, dict[str, Any]]:
     }
 
 
-def _validate_exchange_page(value: object) -> dict[str, Any]:
-    defaults = _default_exchange_page()
+def _validate_exchange_page(value: object, *, mode: str) -> dict[str, Any]:
+    defaults = _default_exchange_page(mode)
     if not isinstance(value, Mapping):
         return defaults
     currencies = value.get("currencies", defaults["currencies"])
@@ -306,6 +328,9 @@ def _validate_exchange_page(value: object) -> dict[str, Any]:
     primary_slot = value.get("primary_slot", defaults["primary_slot"])
     if isinstance(primary_slot, bool) or not isinstance(primary_slot, int) or not 0 <= primary_slot < len(normalized):
         primary_slot = defaults["primary_slot"]
+    active_slot = value.get("active_slot", primary_slot)
+    if isinstance(active_slot, bool) or not isinstance(active_slot, int) or not 0 <= active_slot < len(normalized):
+        active_slot = primary_slot
     raw_amount = str(value.get("amount", defaults["amount"]) or "").strip()
     if raw_amount:
         try:
@@ -314,9 +339,6 @@ def _validate_exchange_page(value: object) -> dict[str, Any]:
             amount = defaults["amount"]
     else:
         amount = ""
-    mode = value.get("mode", defaults["mode"])
-    if mode not in {"market", "c2c"}:
-        mode = defaults["mode"]
     provider = str(value.get("provider", defaults["provider"])).strip().lower()
     if provider not in {"auto", "binance", "okx"}:
         provider = defaults["provider"]
@@ -325,13 +347,21 @@ def _validate_exchange_page(value: object) -> dict[str, Any]:
         payment_method and re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", payment_method) is None
     ):
         payment_method = ""
+    try:
+        settlement_fiat = normalize_currency_code(
+            value.get("settlement_fiat", defaults["settlement_fiat"])
+        )
+    except (TypeError, ValueError):
+        settlement_fiat = defaults["settlement_fiat"]
     return {
         "currencies": normalized,
         "primary_slot": primary_slot,
+        "active_slot": active_slot,
         "amount": amount,
         "mode": mode,
         "provider": provider,
         "payment_method": payment_method,
+        "settlement_fiat": settlement_fiat,
     }
 
 
@@ -339,8 +369,12 @@ def _validate_pages(value: object, settings: AppSettings) -> dict[str, dict[str,
     defaults = _default_pages()
     source = value if isinstance(value, Mapping) else {}
     validated: dict[str, dict[str, Any]] = {}
-    validated["exchange"] = _validate_exchange_page(source.get("exchange"))
-    for page_name in CURRENT_PAGE_NAMES[1:]:
+    legacy_exchange = source.get("exchange")
+    validated["exchange"] = _validate_exchange_page(legacy_exchange, mode="c2c")
+    validated["market_exchange"] = _validate_exchange_page(
+        source.get("market_exchange", legacy_exchange), mode="market"
+    )
+    for page_name in CURRENT_PAGE_NAMES[2:]:
         raw_page = source.get(page_name)
         if not isinstance(raw_page, Mapping):
             validated[page_name] = dict(defaults[page_name])
@@ -350,7 +384,7 @@ def _validate_pages(value: object, settings: AppSettings) -> dict[str, dict[str,
             safe_page if isinstance(safe_page, dict) else dict(defaults[page_name])
         )
 
-    # Preserve safe forward-compatible page partitions while keeping schema-v2
+    # Preserve safe forward-compatible page partitions while keeping versioned
     # validation isolated to one object at a time.
     for raw_name, raw_page in source.items():
         name = str(raw_name).strip()
@@ -675,7 +709,7 @@ class SettingsStore:
             return settings
 
     def save(self, settings: AppSettings) -> bool:
-        """Atomically save v2 settings while retaining the previous valid version."""
+        """Atomically save current settings while retaining the previous valid version."""
 
         try:
             validated = self.validate(settings)
@@ -782,7 +816,9 @@ class SettingsStore:
             raise TypeError("设置对象类型无效")
         defaults = AppSettings()
         zone_names = set(_cached_timezone_names())
-        if not isinstance(settings.theme, str) or settings.theme not in {"dark", "light"}:
+        if not isinstance(settings.theme, str) or settings.theme not in {
+            "dark", "light", "ocean", "forest", "plum"
+        }:
             settings.theme = defaults.theme
         if not isinstance(settings.timezone, str) or settings.timezone not in zone_names:
             settings.timezone = defaults.timezone

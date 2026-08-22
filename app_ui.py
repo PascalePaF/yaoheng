@@ -10,6 +10,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from exchange_page import (
     PAYMENT_UNKNOWN_LABEL,
     PROVIDER_BY_LABEL,
     PROVIDER_LABELS,
+    C2CBridgeJob,
     C2CQuoteJob,
     ExchangeCoordinator,
     ExchangeEdgeResult,
@@ -95,6 +97,94 @@ THEMES = {
     "selection": "#B8DDFC",
     "selection_text": "#102436",
     },
+    "ocean": {
+    "bg": "#06131F",
+    "sidebar": "#0A1B2A",
+    "card": "#10283B",
+    "card_alt": "#17364D",
+    "key": "#1D4059",
+    "key_hover": "#28526E",
+    "muted_key": "#24465D",
+    "accent": "#52C7FF",
+    "accent_hover": "#83D7FF",
+    "accent_dark": "#103C57",
+    "text": "#F4FAFF",
+    "muted": "#A1B9C9",
+    "line": "#2A526B",
+    "up": "#55D6A1",
+    "down": "#FF7A87",
+    "on_accent": "#062235",
+    "subtle": "#86A5B8",
+    "grid": "#1D3B50",
+    "up_fill": "#123D35",
+    "down_fill": "#44232D",
+    "up_row": "#17684F",
+    "down_row": "#7B3341",
+    "tooltip": "#17364D",
+    "selection": "#9EDCFF",
+    "selection_text": "#082237",
+    },
+    "forest": {
+    "bg": "#08140F",
+    "sidebar": "#0D1D16",
+    "card": "#142A20",
+    "card_alt": "#1C382B",
+    "key": "#244936",
+    "key_hover": "#315D46",
+    "muted_key": "#2B4D3C",
+    "accent": "#F1B84B",
+    "accent_hover": "#FFD06F",
+    "accent_dark": "#443518",
+    "text": "#F5FBF7",
+    "muted": "#A6BCAE",
+    "line": "#345944",
+    "up": "#55D68B",
+    "down": "#FF7D76",
+    "on_accent": "#261B06",
+    "subtle": "#8EA899",
+    "grid": "#274435",
+    "up_fill": "#153C2A",
+    "down_fill": "#472522",
+    "up_row": "#1D6D49",
+    "down_row": "#803B39",
+    "tooltip": "#1C382B",
+    "selection": "#BDE9CE",
+    "selection_text": "#10281B",
+    },
+    "plum": {
+    "bg": "#130C19",
+    "sidebar": "#1B1024",
+    "card": "#291936",
+    "card_alt": "#372247",
+    "key": "#472D59",
+    "key_hover": "#5A3A70",
+    "muted_key": "#503662",
+    "accent": "#D9A0FF",
+    "accent_hover": "#E7C1FF",
+    "accent_dark": "#4A285F",
+    "text": "#FCF7FF",
+    "muted": "#C1AACD",
+    "line": "#604475",
+    "up": "#64D69B",
+    "down": "#FF7E9A",
+    "on_accent": "#281133",
+    "subtle": "#AB92B8",
+    "grid": "#422F51",
+    "up_fill": "#183D31",
+    "down_fill": "#4C2637",
+    "up_row": "#227051",
+    "down_row": "#84364E",
+    "tooltip": "#372247",
+    "selection": "#E5C7F5",
+    "selection_text": "#2B1636",
+    },
+}
+THEME_LABELS = {
+    "dark": "深夜橙",
+    "light": "明亮橙",
+    "ocean": "深海蓝",
+    "forest": "森林绿",
+    "plum": "暮色紫",
 }
 COLORS = dict(THEMES["dark"])
 
@@ -1241,6 +1331,7 @@ class DualConverterPage(tk.Frame):
         self.payment_cache: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
         self.payment_request: tuple[str, str, int] | None = None
         self.conversion_generation = 0
+        self.conversion_cancel = threading.Event()
         self.c2c_edge_results: dict[int, ExchangeEdgeResult] = {}
         self.c2c_pending_slots: set[int] = set()
         self.crypto_payment_generation = 0
@@ -1531,6 +1622,10 @@ class DualConverterPage(tk.Frame):
             return
 
     def _advance_conversion_generation(self) -> int:
+        cancel = getattr(self, "conversion_cancel", None)
+        if cancel is not None:
+            cancel.set()
+        self.conversion_cancel = threading.Event()
         generation = int(getattr(self, "conversion_generation", 0)) + 1
         self.conversion_generation = generation
         results = getattr(self, "c2c_edge_results", None)
@@ -1690,14 +1785,15 @@ class DualConverterPage(tk.Frame):
             self.convert_from(self.active_side)
         self._refresh_crypto_payment_options()
 
-    def _start_crypto_quote(self, job: C2CQuoteJob) -> None:
+    def _start_crypto_quote(self, job: C2CQuoteJob | C2CBridgeJob) -> None:
         if self.coordinator is None or not self.visible:
             return
         self.conversion_bridge.expect()
+        cancel = self.conversion_cancel
 
         def worker() -> None:
             try:
-                quote = self.coordinator.execute_job(job)
+                quote = self.coordinator.execute_job(job, cancel=cancel)
                 self.conversion_bridge.deliver(job, quote, None)
             except Exception as exc:
                 self.conversion_bridge.deliver(job, None, exc)
@@ -1709,7 +1805,7 @@ class DualConverterPage(tk.Frame):
             not self.visible
             or self.current_snapshot is None
             or self.coordinator is None
-            or not isinstance(job, C2CQuoteJob)
+            or not isinstance(job, (C2CQuoteJob, C2CBridgeJob))
             or job.generation != self.conversion_generation
         ):
             return
@@ -1892,7 +1988,7 @@ class DualConverterPage(tk.Frame):
                 and self.current_snapshot is not None
             ):
                 statuses: list[str] = []
-                jobs: list[C2CQuoteJob] = []
+                jobs: list[C2CQuoteJob | C2CBridgeJob] = []
                 for other_side in ("a", "b", "c"):
                     if other_side == side:
                         continue
@@ -1906,9 +2002,11 @@ class DualConverterPage(tk.Frame):
                         mode="c2c",
                         provider=self.c2c_provider,
                         payment_method=self.c2c_payment_method,
+                        payment_fiat=self.payment_supported_fiat,
+                        settlement_fiat=self.payment_supported_fiat or "CNY",
                         from_cache=bool(getattr(self, "current_snapshot_from_cache", False)),
                     )
-                    if isinstance(result, C2CQuoteJob):
+                    if isinstance(result, (C2CQuoteJob, C2CBridgeJob)):
                         variables[other_side].set("…" if self.visible else "")
                         jobs.append(result)
                     else:
@@ -3059,7 +3157,7 @@ class HistoryPanel(tk.Frame):
 
 class SettingsPage(tk.Frame):
     PAGE_LABELS = {
-        "calculator": "计算器", "exchange": "兑换", "fiat": "货币", "fiat_market": "货币行情趋势",
+        "calculator": "计算器", "exchange": "C2C 兑换", "market_exchange": "市场兑换", "fiat": "货币", "fiat_market": "货币行情趋势",
         "crypto": "虚拟币", "market": "虚拟币行情趋势", "settings": "设置",
     }
     CLOSE_LABELS = {"exit": "关闭时退出应用", "minimize": "关闭时最小化"}
@@ -3187,12 +3285,14 @@ class SettingsPage(tk.Frame):
         body.bind("<Configure>", lambda _e: self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
         self.settings_canvas.bind("<Configure>", lambda e: self.settings_canvas.itemconfigure(self.settings_window, width=e.width))
 
-        appearance = self._card(body, "外观模式", "白天与黑夜模式均采用高对比度字体", 0, 0)
+        appearance = self._card(body, "外观主题", "五套高对比度主题即时切换，布局与字号保持不变", 0, 0)
         theme_row = tk.Frame(appearance, bg=COLORS["card"])
         theme_row.pack(fill="x", padx=20, pady=(12, 18))
-        for value, label in (("dark", "黑夜模式"), ("light", "白天模式")):
+        for column in range(3):
+            theme_row.grid_columnconfigure(column, weight=1, uniform="theme_buttons")
+        for index, (value, label) in enumerate(THEME_LABELS.items()):
             button = AppButton(theme_row, ("●  " if value == self.settings.theme else "○  ") + label, lambda selected=value: self._set_theme(selected), "outline" if value == self.settings.theme else "ghost", 10)
-            button.pack(side="left", expand=True, fill="x", padx=(0, 5) if value == "dark" else (5, 0), ipady=7)
+            button.grid(row=index // 3, column=index % 3, sticky="ew", padx=4, pady=4, ipady=6)
             self.theme_buttons[value] = button
 
         timezone_card = self._card(body, "刷新显示时区", "UTC 偏移 · IANA 时区 · 所选时区当前时间", 0, 1)
@@ -3604,7 +3704,7 @@ class SettingsPage(tk.Frame):
         self.theme_callback(theme)
         for value, button in self.theme_buttons.items():
             selected = value == theme
-            label = "黑夜模式" if value == "dark" else "白天模式"
+            label = THEME_LABELS[value]
             button.configure(text=("●  " if selected else "○  ") + label, bg=COLORS["card"], fg=COLORS["accent"] if selected else COLORS["muted"], activebackground=COLORS["accent_dark"] if selected else COLORS["card_alt"], activeforeground=COLORS["accent"] if selected else COLORS["muted"], font=(FONT, 10, "bold" if selected else "normal"))
 
     def _timezone_displays(self, now: datetime | None = None) -> list[str]:
@@ -3833,7 +3933,7 @@ class YaohengApp:
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
         self.sidebar.grid_columnconfigure(0, weight=1)
-        self.sidebar.grid_rowconfigure(8, weight=1)
+        self.sidebar.grid_rowconfigure(9, weight=1)
         brand = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
         brand.grid(row=0, column=0, sticky="ew", padx=18, pady=(26, 32))
         self.logo_canvas = tk.Canvas(brand, width=42, height=42, bg=COLORS["sidebar"], bd=0, highlightthickness=0)
@@ -3846,7 +3946,8 @@ class YaohengApp:
 
         items = [
             ("calculator", "▦   计算器", 11, 22),
-            ("exchange", "⇄   兑换", 11, 22),
+            ("exchange", "⇄   C2C 兑换", 11, 22),
+            ("market_exchange", "⇆   市场兑换", 11, 22),
             ("fiat", "¥   货币", 11, 22),
             ("fiat_market", "　　¥⌁  货币行情趋势", 9, 22),
             ("crypto", "₿   虚拟币", 11, 22),
@@ -3863,7 +3964,7 @@ class YaohengApp:
             button.grid(row=row, column=0, sticky="ew", padx=10, pady=3)
             self.nav_buttons[key] = button
         footer = tk.Frame(self.sidebar, bg=COLORS["sidebar"])
-        footer.grid(row=9, column=0, sticky="sew", padx=22, pady=20)
+        footer.grid(row=10, column=0, sticky="sew", padx=22, pady=20)
         self.network_button = tk.Button(
             footer, text="●  正在准备联网  ↻", command=self.refresh_rates, anchor="center",
             bg=COLORS["accent_dark"], fg=COLORS["accent"], activebackground=COLORS["card_alt"],
@@ -3904,6 +4005,21 @@ class YaohengApp:
             colors=COLORS,
             font_name=FONT,
             currency_selector_factory=SearchSelect,
+            fixed_mode="c2c",
+            page_title="C2C 兑换",
+        )
+        self.pages["market_exchange"] = ExchangePage(
+            content,
+            self.exchange_coordinator,
+            ExchangePageState.from_mapping(self.settings.pages.get("market_exchange")),
+            self.refresh_rates,
+            lambda state: self.save_page_state("market_exchange", state),
+            self.format_timestamp,
+            colors=COLORS,
+            font_name=FONT,
+            currency_selector_factory=SearchSelect,
+            fixed_mode="market",
+            page_title="市场兑换",
         )
         self.pages["fiat"] = DualConverterPage(
             content, self.service, "fiat", self.refresh_rates, self.format_timestamp,
@@ -4025,7 +4141,7 @@ class YaohengApp:
         self.network_button.configure(text="●  正在重新连接…", state="disabled")
         scope_text = "货币" if section == "fiat" else "虚拟币" if section == "crypto" else "汇率与行情"
         self._set_network_status(None, f"正在获取最新{scope_text}")
-        page_keys = ("exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "crypto", "market") if section == "crypto" else ("exchange", "fiat", "fiat_market", "crypto", "market")
+        page_keys = ("exchange", "market_exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
         for key in page_keys:
             page = self.pages.get(key)
             if hasattr(page, "begin_refresh"):
@@ -4080,7 +4196,7 @@ class YaohengApp:
             if self.service.snapshot.rates:
                 self.apply_snapshot(self.service.snapshot, True, animated=True, section=section)
             else:
-                page_keys = ("exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "crypto", "market") if section == "crypto" else ("exchange", "fiat", "fiat_market", "crypto", "market")
+                page_keys = ("exchange", "market_exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
                 for key in page_keys:
                     page = self.pages.get(key)
                     if hasattr(page, "finish_refresh_failure"):
@@ -4139,9 +4255,9 @@ class YaohengApp:
 
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
         keys = (
-            ("exchange", "fiat", "fiat_market", "crypto", "market") if section == "fiat" else
-            ("exchange", "crypto", "market") if section == "crypto" else
-            ("exchange", "fiat", "fiat_market", "crypto", "market")
+            ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market") if section == "fiat" else
+            ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else
+            ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
         )
         for key in keys:
             page = self.pages.get(key)
@@ -4209,7 +4325,7 @@ class YaohengApp:
         return saved
 
     def save_page_state(self, page: str, state: dict[str, object]) -> None:
-        if page not in {"exchange", "fiat", "crypto", "fiat_market", "market", "settings"}:
+        if page not in {"exchange", "market_exchange", "fiat", "crypto", "fiat_market", "market", "settings"}:
             return
         self.settings.pages[page] = dict(state)
         self.settings_store.schedule_save(self.settings)
@@ -4598,9 +4714,12 @@ class YaohengApp:
     def set_theme(self, theme: str) -> None:
         if theme not in THEMES or theme == self.settings.theme:
             return
+        started = time.perf_counter()
         old = dict(COLORS)
         self.settings.theme = theme
-        self._persist_settings()
+        # Keep the visual switch independent of disk latency. The debounced
+        # snapshot is flushed synchronously during normal application exit.
+        self.settings_store.schedule_save(self.settings)
         COLORS.clear()
         COLORS.update(THEMES[theme])
         keys_by_color: dict[str, list[str]] = {}
@@ -4633,13 +4752,32 @@ class YaohengApp:
                 return "card"
             return candidates[0]
 
+        color_options = (
+            "background", "foreground", "activebackground", "activeforeground",
+            "insertbackground", "highlightbackground", "highlightcolor",
+            "selectbackground", "selectforeground", "readonlybackground",
+            "selectcolor", "disabledforeground",
+        )
+
         def recolor(widget: tk.Misc) -> None:
-            for option in ("background", "foreground", "activebackground", "activeforeground", "insertbackground", "highlightbackground", "highlightcolor", "selectbackground", "selectforeground", "readonlybackground", "selectcolor", "disabledforeground"):
+            changes: dict[str, str] = {}
+            try:
+                configuration = widget.configure()
+            except (tk.TclError, TypeError):
+                configuration = {}
+            for option in color_options:
+                if option not in configuration:
+                    continue
                 try:
-                    current = str(widget.cget(option))
+                    current = str(configuration[option][-1])
                     key = theme_key(widget, option, current)
                     if key and key in COLORS:
-                        widget.configure(**{option: COLORS[key]})
+                        changes[option] = COLORS[key]
+                except (IndexError, TypeError):
+                    continue
+            if changes:
+                try:
+                    widget.configure(**changes)
                 except (tk.TclError, TypeError):
                     pass
             for child in widget.winfo_children():
@@ -4670,8 +4808,12 @@ class YaohengApp:
                 market.watch_table.tag_configure("down", background=COLORS["down_row"], foreground=COLORS["text"])
                 market.watch_table.tag_configure("flat", background=COLORS["card_alt"], foreground=COLORS["text"])
                 market.chart.configure(bg=COLORS["card"])
-                market.chart.redraw()
                 market._highlight_days()
+                try:
+                    self.root.after_idle(market.chart.redraw)
+                except tk.TclError:
+                    pass
+        self.last_theme_switch_ms = (time.perf_counter() - started) * 1000
 
     def set_timezone(self, zone: str) -> None:
         try:
