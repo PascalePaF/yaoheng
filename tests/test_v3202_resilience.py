@@ -291,13 +291,13 @@ class CloseBehaviorTests(unittest.TestCase):
         app.toggle_history = MagicMock()
         return app
 
-    def test_close_setting_minimizes_without_exiting(self):
+    def test_legacy_minimize_setting_is_ignored_and_exits(self):
         app = self.app("minimize")
 
         YaohengApp.on_close_request(app)
 
-        app.root.iconify.assert_called_once_with()
-        app.force_exit.assert_not_called()
+        app.force_exit.assert_called_once_with()
+        app.root.iconify.assert_not_called()
 
     def test_close_setting_can_fully_exit(self):
         app = self.app("exit")
@@ -323,11 +323,7 @@ class CloseBehaviorTests(unittest.TestCase):
         app.root.attributes.assert_any_call("-topmost", False)
 
     def test_close_action_labels_are_explicit(self):
-        self.assertEqual(
-            set(SettingsPage.CLOSE_LABELS),
-            {"minimize", "exit"},
-        )
-        self.assertIn("任务栏", SettingsPage.CLOSE_LABELS["minimize"])
+        self.assertEqual(set(SettingsPage.CLOSE_LABELS), {"exit"})
         self.assertIn("彻底退出", SettingsPage.CLOSE_LABELS["exit"])
 
 

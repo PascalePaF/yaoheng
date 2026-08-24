@@ -417,6 +417,8 @@ class RateService:
     def __init__(self, data_dir: Path | None = None) -> None:
         self._state_lock = RLock()
         self._cache_lock = RLock()
+        self._decimal_engine_snapshot: RateSnapshot | None = None
+        self._decimal_engine: DecimalConversionEngine | None = None
         self._refresh_flights: dict[str, _RefreshFlight] = {}
         self._refresh_generation = {"fiat": 0, "crypto": 0}
         self._committed_generation = {"fiat": 0, "crypto": 0}
@@ -584,7 +586,7 @@ class RateService:
 
         with self._state_lock:
             snapshot = self.snapshot
-            rates = self._rate_strings_from_snapshot(snapshot, require_anchor=False)
+            rates = self._decimal_engine_for_snapshot(snapshot).rate_strings
             names = {code: snapshot.names.get(code, code) for code in rates}
             kinds = {code: snapshot.kinds[code] for code in rates if code in snapshot.kinds}
             return DecimalRateSnapshot(
@@ -604,6 +606,31 @@ class RateService:
 
     def get_rate_strings(self) -> dict[str, str]:
         return dict(self.get_decimal_snapshot().rates)
+
+    def _decimal_engine_for_snapshot(
+        self, snapshot: RateSnapshot | None = None
+    ) -> DecimalConversionEngine:
+        """Return one immutable exact converter per committed rate batch.
+
+        Building an engine validates every rate. Rebuilding it for every row in
+        the fiat tables turned one O(n) render into O(n²) work and blocked Tk for
+        close to a second. Snapshot identity is the invalidation boundary used
+        by refreshes, cache switches and tests that inject a new batch.
+        """
+
+        with self._state_lock:
+            current = self.snapshot if snapshot is None else snapshot
+            if (
+                self._decimal_engine is not None
+                and self._decimal_engine_snapshot is current
+            ):
+                return self._decimal_engine
+            rates = self._rate_strings_from_snapshot(current, require_anchor=False)
+            engine = DecimalConversionEngine(rates, current.kinds)
+            if current is self.snapshot:
+                self._decimal_engine_snapshot = current
+                self._decimal_engine = engine
+            return engine
 
     def _atomic_write_json(self, path: Path, payload: Any) -> None:
         encoded = json.dumps(
@@ -1195,9 +1222,7 @@ class RateService:
     def convert_exact(self, amount: object, source: str, target: str) -> str:
         """Convert with canonical strings and no float result boundary."""
 
-        snapshot = self.get_decimal_snapshot()
-        engine = DecimalConversionEngine(snapshot.rates, snapshot.kinds)
-        return engine.convert_exact(amount, source, target)
+        return self._decimal_engine_for_snapshot().convert_exact(amount, source, target)
 
     convert_decimal = convert_exact
 

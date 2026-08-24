@@ -891,8 +891,10 @@ class SettingsStore:
             geometry_valid = False
         if not geometry_valid:
             settings.window_geometry = defaults.window_geometry
-        if not isinstance(settings.close_action, str) or settings.close_action not in {"exit", "minimize"}:
-            settings.close_action = defaults.close_action
+        # Since 3.21.3 the title-bar close button is unambiguous: it always
+        # exits. Migrate the former "minimize" choice so old installations do
+        # not remain hidden in the background after an upgrade.
+        settings.close_action = "exit"
         if not isinstance(settings.startup_page, str) or settings.startup_page not in LEGACY_NAVIGATION_PAGES:
             settings.startup_page = defaults.startup_page
         if not isinstance(settings.last_page, str) or settings.last_page not in LEGACY_NAVIGATION_PAGES:

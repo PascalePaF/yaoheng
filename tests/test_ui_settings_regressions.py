@@ -136,17 +136,18 @@ class TkTaskRegressionTests(unittest.TestCase):
 
         chart_reloads: dict[str, list[bool]] = {"fiat_market": [], "market": []}
 
-        def market_page(key: str):
+        def market_page(key: str, visible: bool):
             page = MarketPage.__new__(MarketPage)
+            page.visible = visible
             page.apply_snapshot = lambda *_args, reload_chart=True: chart_reloads[key].append(reload_chart)
             return page
 
         app = YaohengApp.__new__(YaohengApp)
         app.pages = {
             "fiat": Page(),
-            "fiat_market": market_page("fiat_market"),
+            "fiat_market": market_page("fiat_market", True),
             "crypto": Page(),
-            "market": market_page("market"),
+            "market": market_page("market", False),
         }
 
         YaohengApp.apply_snapshot(app, object(), False, section="fiat")
@@ -731,7 +732,7 @@ class SettingsPersistenceRegressionTests(unittest.TestCase):
         })
         self.assertEqual(settings.theme, "dark")
         self.assertEqual(settings.startup_page, "calculator")
-        self.assertEqual(settings.close_action, "minimize")
+        self.assertEqual(settings.close_action, "exit")
         self.assertEqual(settings.history_limit, 12)
 
     def test_timezone_names_returns_a_copy(self):

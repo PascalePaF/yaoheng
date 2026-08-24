@@ -15,7 +15,7 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -1320,7 +1320,7 @@ class CalculatorPage(tk.Frame):
         for row, variable in enumerate(self.inline_history_vars):
             label = tk.Label(
                 display, textvariable=variable, bg=COLORS["display_bg"],
-                fg=COLORS["display_expression"], font=("Segoe UI", 11),
+                fg=COLORS["display_expression"], font=(FONT, 11),
                 anchor="e", padx=26,
             )
             label.grid(row=row, column=0, sticky="ew", pady=((13, 1) if row == 0 else 1))
@@ -1328,7 +1328,7 @@ class CalculatorPage(tk.Frame):
             self.inline_history_labels.append(label)
         self.formula_label = tk.Label(
             display, textvariable=self.formula_var, bg=COLORS["display_bg"],
-            fg=COLORS["display_expression"], font=("Segoe UI", 16),
+            fg=COLORS["display_expression"], font=(FONT, 16),
             anchor="e", padx=26,
         )
         self.formula_label.grid(row=2, column=0, sticky="ew", pady=(4, 0))
@@ -1343,6 +1343,7 @@ class CalculatorPage(tk.Frame):
         self.expression_entry.grid(row=3, column=0, sticky="ew", padx=24, pady=(3, 14), ipady=5)
         self.expression_entry.bind("<FocusIn>", self._expression_focus_in)
         self.expression_entry.bind("<KeyPress>", self._expression_keypress, add="+")
+        self.expression_entry.bind("<<Paste>>", self._paste_expression, add="+")
         self.expression_entry.bind("<Return>", self._evaluate_manual_expression)
         self.expression_entry.bind("<KP_Enter>", self._evaluate_manual_expression)
         self.expression_var.trace_add("write", self._manual_expression_changed)
@@ -1392,9 +1393,9 @@ class CalculatorPage(tk.Frame):
         formula_size = max(12, min(21, int(available / 38)))
         history_size = max(9, min(14, int(available / 58)))
         self.expression_entry.configure(font=("Segoe UI", large_size))
-        self.formula_label.configure(font=("Segoe UI", formula_size))
+        self.formula_label.configure(font=(FONT, formula_size))
         for label in self.inline_history_labels:
-            label.configure(font=("Segoe UI", history_size))
+            label.configure(font=(FONT, history_size))
 
     def set_history_open(self, is_open: bool) -> None:
         self.history_button.configure(text="关闭历史记录" if is_open else "打开历史记录")
@@ -1519,7 +1520,7 @@ class CalculatorPage(tk.Frame):
             self.after_jobs.schedule(1700, self.refresh_display)
 
     def _expression_focus_in(self, _event: tk.Event) -> None:
-        if self.expression_var.get() == "0":
+        if self.expression_var.get() == "0" or self.model.just_evaluated:
             self.expression_entry.selection_range(0, tk.END)
 
     def _expression_keypress(self, event: tk.Event) -> str | None:
@@ -1530,7 +1531,10 @@ class CalculatorPage(tk.Frame):
         if normalized == "=":
             self.after_jobs.schedule(0, self._evaluate_manual_expression, idle=True)
             return "break"
-        if normalized and normalized != raw_char:
+        if normalized and (
+            normalized in "0123456789+-*/%^().,−×÷!π"
+            or normalized.isascii() and (normalized.isalpha() or normalized == "_")
+        ):
             self._insert_expression_token(normalized)
             return "break"
         if not raw_char:
@@ -1550,10 +1554,25 @@ class CalculatorPage(tk.Frame):
                 return "break"
         return None
 
-    def _insert_expression_token(self, token: str) -> None:
-        """Insert normalized keyboard text without relying on a mapped Tk window."""
+    @staticmethod
+    def _is_direct_operator(token: str) -> bool:
+        normalized = normalize_amount_input(token).strip()
+        return normalized in {"+", "-", "−", "*", "×", "/", "÷", "^", "%"}
 
-        current = self.expression_var.get()
+    def _replace_direct_display(self, token: str, current: str) -> bool:
+        """Return whether direct text starts a new calculation.
+
+        Number/decimal/function input replaces the initial zero or a completed
+        result.  A binary operator deliberately continues from that result.
+        This keeps keyboard, paste and keypad behaviour aligned with buttons.
+        """
+
+        stripped = normalize_amount_input(token).strip()
+        if not stripped or self._is_direct_operator(stripped) or stripped in {")", "!"}:
+            return False
+        return current.strip() in {"", "0"} or self.model.just_evaluated
+
+    def _selection_bounds(self, current: str) -> tuple[int, int]:
         try:
             start = int(self.expression_entry.index(tk.SEL_FIRST))
             end = int(self.expression_entry.index(tk.SEL_LAST))
@@ -1564,11 +1583,55 @@ class CalculatorPage(tk.Frame):
                 start = end = len(current)
         start = max(0, min(start, len(current)))
         end = max(start, min(end, len(current)))
+        return start, end
+
+    def _insert_expression_token(self, token: str) -> None:
+        """Insert normalized keyboard text without relying on a mapped Tk window."""
+
+        token = {"-": "−", "*": "×", "/": "÷"}.get(
+            normalize_amount_input(token), normalize_amount_input(token)
+        )
+        current = self.expression_var.get()
+        replace_display = self._replace_direct_display(token, current)
+        start, end = self._selection_bounds(current)
+        if replace_display:
+            current = ""
+            start = end = 0
+            if token == ".":
+                token = "0."
+        elif self.model.just_evaluated or current.strip() == "0":
+            # A selected completed result must not be overwritten by a binary
+            # operator: operators continue from the displayed value.
+            start = end = len(current)
         self.expression_var.set(current[:start] + token + current[end:])
         try:
+            self.expression_entry.selection_clear()
             self.expression_entry.icursor(start + len(token))
         except tk.TclError:
             pass
+
+    def _paste_expression(self, _event: tk.Event | None = None) -> str:
+        try:
+            pasted = normalize_amount_input(str(self.expression_entry.clipboard_get())).strip()
+        except tk.TclError:
+            return "break"
+        if not pasted:
+            return "break"
+        current = self.expression_var.get()
+        replace_display = self._replace_direct_display(pasted, current)
+        start, end = self._selection_bounds(current)
+        if replace_display:
+            current = ""
+            start = end = 0
+        elif self.model.just_evaluated and self._is_direct_operator(pasted):
+            start = end = len(current)
+        self.expression_var.set(current[:start] + pasted + current[end:])
+        try:
+            self.expression_entry.selection_clear()
+            self.expression_entry.icursor(min(512, start + len(pasted)))
+        except tk.TclError:
+            pass
+        return "break"
 
     def _manual_expression_changed(self, *_args) -> None:
         if self._updating_expression:
@@ -1629,7 +1692,10 @@ class CalculatorPage(tk.Frame):
     def activate_keyboard(self) -> None:
         try:
             self.expression_entry.focus_force()
-            self.expression_entry.icursor(tk.END)
+            if self.expression_var.get() == "0" or self.model.just_evaluated:
+                self.expression_entry.selection_range(0, tk.END)
+            else:
+                self.expression_entry.icursor(tk.END)
         except tk.TclError:
             pass
 
@@ -2360,19 +2426,10 @@ class DualConverterPage(tk.Frame):
         if self.refreshing:
             return
         self.refreshing = True
-        self._hide_action_buttons()
-        self._set_action_headings()
-        self.table.delete(*self.table.get_children())
-        self.refresh_button.configure(state="disabled")
-        frames = ["刷新中 ·", "刷新中 ··", "刷新中 ···"]
-
-        def spin(index: int = 0) -> None:
-            if not self.refreshing:
-                return
-            self.refresh_button.configure(text=frames[index % len(frames)])
-            self.spinner_job = self.after(180, lambda: spin(index + 1))
-
-        spin()
+        # Keep the trusted conversion table and row controls in place. A static
+        # status is enough; deleting and rebuilding rows before the request
+        # returns made every page change visibly flash twice.
+        self.refresh_button.configure(text="正在刷新…", state="disabled")
 
     def finish_refresh_failure(self) -> None:
         self.refreshing = False
@@ -3172,9 +3229,9 @@ class MarketPage(tk.Frame):
                 and self.raw_points_days == self.current_days
             )
             if raw_matches:
-                self.rerender_currency()
+                self.rerender_currency(refresh_watchlist=False)
             elif not self.loading:
-                self.load_chart()
+                self._queue_chart_load(40)
 
     def on_hide(self) -> None:
         self.visible = False
@@ -3274,9 +3331,8 @@ class MarketPage(tk.Frame):
             self.rerender_currency(refresh_watchlist=False)
 
     def begin_refresh(self) -> None:
-        self.watch_table.delete(*self.watch_table.get_children())
-        self.price_var.set("正在刷新…")
-        self.change_var.set("—")
+        # Keep the trusted rows, price and chart visible while the network
+        # worker runs. Clearing here creates a full-page white/black flash.
         self.refresh_button.configure(text=("汇率批量刷新中…" if self.mode == "fiat" else "行情批量刷新中…"), state="disabled")
 
     def finish_refresh_failure(self) -> None:
@@ -3631,10 +3687,7 @@ class SettingsPage(tk.Frame):
         "calculator": "计算器", "exchange": "C2C 兑换", "market_exchange": "市场兑换", "fiat": "货币", "fiat_market": "货币行情趋势",
         "crypto": "虚拟币", "market": "虚拟币行情趋势", "settings": "设置",
     }
-    CLOSE_LABELS = {
-        "minimize": "点击 × 时最小化到任务栏",
-        "exit": "点击 × 时彻底退出软件",
-    }
+    CLOSE_LABELS = {"exit": "点击 × 时彻底退出软件"}
     MODE_LABELS = {"standard": "标准模式", "professional": "专业模式"}
     COPY_LABELS = {"number": "纯数字", "grouped": "带千位分隔符", "formula": "完整算式与结果"}
 
@@ -4388,6 +4441,7 @@ class YaohengApp:
         COLORS.clear()
         COLORS.update(THEMES[self.settings.theme])
         self.root = tk.Tk()
+        self._configure_ui_fonts()
         self.root.title(f"曜衡 {APP_VERSION}")
         geometry = self.settings.window_geometry if self.settings.remember_window_geometry else "1380x820"
         try:
@@ -4444,6 +4498,7 @@ class YaohengApp:
         self.network_state: bool | str | None = None
         self.auto_jobs: dict[str, str | None] = {"fiat": None, "crypto": None}
         self.startup_job: str | None = None
+        self.page_open_refresh_job: str | None = None
         self._page_open_refresh_enabled = False
         self.geometry_job: str | None = None
         self.exiting = False
@@ -4474,10 +4529,22 @@ class YaohengApp:
         self.root.after(120, self._activate_calculator_if_current)
         self.root.after_idle(self._responsive_window_changed)
 
+    def _configure_ui_fonts(self) -> None:
+        """Use one CJK-capable family for Tk's implicit text styles."""
+
+        for name in (
+            "TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+            "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont",
+        ):
+            try:
+                tkfont.nametofont(name, root=self.root).configure(family=FONT)
+            except tk.TclError:
+                continue
+
     def _styles(self) -> None:
         style = ttk.Style(self.root)
         style.theme_use("clam")
-        style.configure("TCombobox", fieldbackground=COLORS["card_alt"], background=COLORS["card_alt"], foreground=COLORS["text"], arrowcolor=COLORS["accent"], bordercolor=COLORS["line"], lightcolor=COLORS["line"], darkcolor=COLORS["line"], padding=7)
+        style.configure("TCombobox", fieldbackground=COLORS["card_alt"], background=COLORS["card_alt"], foreground=COLORS["text"], arrowcolor=COLORS["accent"], bordercolor=COLORS["line"], lightcolor=COLORS["line"], darkcolor=COLORS["line"], padding=7, font=(FONT, 9))
         style.map("TCombobox", fieldbackground=[("readonly", COLORS["card_alt"])], foreground=[("readonly", COLORS["text"])])
         self.root.option_add("*TCombobox*Listbox.background", COLORS["card_alt"])
         self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
@@ -4795,7 +4862,8 @@ class YaohengApp:
         self.current_page = page
         if self.settings.remember_last_page:
             self.settings.last_page = page
-            self._persist_settings(notify=False)
+            # Debounced persistence keeps navigation independent from disk I/O.
+            self.settings_store.schedule_save(self.settings)
         self.pages[page].tkraise()
         current = self.pages[page]
         if hasattr(current, "on_show"):
@@ -4807,6 +4875,22 @@ class YaohengApp:
                 fg=COLORS["nav_active_text"] if active else COLORS["sidebar_muted"],
             )
         if getattr(self, "_page_open_refresh_enabled", False):
+            self._queue_page_open_refresh(page)
+
+    def _queue_page_open_refresh(self, page: str) -> None:
+        previous = getattr(self, "page_open_refresh_job", None)
+        if previous:
+            try:
+                self.root.after_cancel(previous)
+            except tk.TclError:
+                pass
+        self.page_open_refresh_job = self.root.after(
+            45, lambda expected=page: self._run_page_open_refresh(expected)
+        )
+
+    def _run_page_open_refresh(self, page: str) -> None:
+        self.page_open_refresh_job = None
+        if page == self.current_page and not getattr(self, "exiting", False):
             self._refresh_page_on_open(page)
 
     def _refresh_page_on_open(self, page: str) -> None:
@@ -4867,20 +4951,6 @@ class YaohengApp:
             page = self.pages.get(key)
             if hasattr(page, "begin_refresh"):
                 page.begin_refresh()  # type: ignore[attr-defined]
-        # Repaint the last trusted batch one row at a time immediately while the
-        # fresh network batch is in flight; the fresh result replaces it on arrival.
-        if self.service.snapshot.rates:
-            converter_keys = ("fiat",) if section == "fiat" else ("crypto",) if section == "crypto" else ("fiat", "crypto")
-            for key in converter_keys:
-                page = self.pages.get(key)
-                if isinstance(page, DualConverterPage):
-                    page.update_table(self.service.snapshot, animate=True)
-            market_keys = ("fiat_market",) if section == "fiat" else ("market",) if section == "crypto" else ("fiat_market", "market")
-            for key in market_keys:
-                market_page = self.pages.get(key)
-                if isinstance(market_page, MarketPage):
-                    market_page._refresh_watchlist(self.service.snapshot, animated=True)
-
         def worker() -> None:
             try:
                 snapshot = self.service.refresh(section)
@@ -4898,7 +4968,7 @@ class YaohengApp:
         self.active_rate_section = None
         if snapshot:
             self.last_network_at = snapshot.fetched_at
-            self.apply_snapshot(snapshot, False, animated=True, section=section)
+            self.apply_snapshot(snapshot, False, animated=False, section=section)
             if snapshot.errors:
                 detail = "；".join(snapshot.errors[:2])
                 self.last_network_detail = f"部分更新 · {detail}"
@@ -4915,7 +4985,7 @@ class YaohengApp:
             self.network_button.configure(text="●  重新连接网络  ↻", state="normal")
             self._set_network_status(False, f"{self.format_timestamp(now)} {self.last_network_detail}")
             if self.service.snapshot.rates:
-                self.apply_snapshot(self.service.snapshot, True, animated=True, section=section)
+                self.apply_snapshot(self.service.snapshot, True, animated=False, section=section)
             else:
                 page_keys = ("exchange", "market_exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
                 for key in page_keys:
@@ -4987,6 +5057,9 @@ class YaohengApp:
 
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
         keys = (
+            # The mixed crypto converter and crypto market also depend on fiat
+            # quote rates, so a fiat batch updates them without reloading a
+            # hidden chart.
             ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market") if section == "fiat" else
             ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else
             ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
@@ -4997,9 +5070,10 @@ class YaohengApp:
                 continue
             if isinstance(page, MarketPage):
                 reload_chart = (
-                    section == "all"
+                    bool(getattr(page, "visible", False))
+                    and (section == "all"
                     or (section == "fiat" and key == "fiat_market")
-                    or (section == "crypto" and key == "market")
+                    or (section == "crypto" and key == "market"))
                 )
                 page.apply_snapshot(snapshot, from_cache, animated, reload_chart=reload_chart)
             elif hasattr(page, "apply_snapshot"):
@@ -5330,14 +5404,8 @@ class YaohengApp:
             self._persist_settings(notify=False)
 
     def on_close_request(self) -> None:
-        if getattr(self, "update_installing", False):
-            self.force_exit()
-            return
-        if self.settings.close_action == "minimize" and not self.exiting:
-            if self.history_open:
-                self.toggle_history()
-            self.root.iconify()
-            return
+        # Title-bar × always means exit. Users can still use the normal OS
+        # minimize button without changing shutdown semantics.
         self.force_exit()
 
     def restore_window(self) -> None:
@@ -5390,7 +5458,7 @@ class YaohengApp:
         self.loading_rates = False
         self.active_rate_section = None
         self.pending_rate_section = None
-        for attr in ("startup_job", "api_start_job", "geometry_job"):
+        for attr in ("startup_job", "page_open_refresh_job", "api_start_job", "geometry_job"):
             job = getattr(self, attr, None)
             if job:
                 try:
