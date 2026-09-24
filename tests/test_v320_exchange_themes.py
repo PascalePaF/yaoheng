@@ -234,8 +234,9 @@ class V320TkTests(unittest.TestCase):
                 app.service.snapshot = current
                 app.apply_snapshot(current, False)
 
-                c2c_page = app.pages["exchange"]
-                market_page = app.pages["market_exchange"]
+                c2c_page = app.ensure_page("exchange")
+                market_page = app.ensure_page("market_exchange")
+                app.ensure_page("settings")
                 self.assertIsInstance(c2c_page, ExchangePage)
                 self.assertIsInstance(market_page, ExchangePage)
                 self.assertEqual(c2c_page.state.mode, "c2c")

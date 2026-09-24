@@ -194,10 +194,10 @@ class FullWindowLifecycleSmokeTests(unittest.TestCase):
 
                 snapshot = _snapshot()
                 app.service.snapshot = snapshot
-                exchange = app.pages["exchange"]
-                fiat = app.pages["fiat"]
-                crypto = app.pages["crypto"]
-                market = app.pages["market"]
+                exchange = app.ensure_page("exchange")
+                fiat = app.ensure_page("fiat")
+                crypto = app.ensure_page("crypto")
+                market = app.ensure_page("market")
                 self.assertIsInstance(exchange, ExchangePage)
                 self.assertIsInstance(fiat, DualConverterPage)
                 self.assertIsInstance(crypto, DualConverterPage)

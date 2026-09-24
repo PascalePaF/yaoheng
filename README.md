@@ -17,7 +17,7 @@
 
 ## 简介
 
-曜衡 3.21.3 把响应式日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持无闪烁后台刷新、持久计算历史、四种界面语言、容错检查官方 GitHub Release 和覆盖升级。
+曜衡 4.0.0 把响应式日常/专业计算、七栏 C2C 兑换、独立市场兑换、三端换算、金额匹配报价以及法币和虚拟币趋势整合在一个桌面应用中，并支持按需页面加载、稳定表格更新、持久计算历史、四种界面语言、容错检查官方 GitHub Release 和覆盖升级。
 
 应用无需账号，不包含广告或遥测。设置、历史记录、行情缓存和本机 API 令牌校验材料都保存在本机。
 
@@ -27,8 +27,8 @@
 
 | 版本 | 文件 | 用途 |
 | --- | --- | --- |
-| Windows 安装版（推荐） | `Yaoheng-3.21.3-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
-| 绿色免安装版 | `Yaoheng-3.21.3-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
+| Windows 安装版（推荐） | `Yaoheng-4.0.0-Windows-x64-Setup.exe` | 当前用户安装、覆盖升级、开始菜单、可选桌面快捷方式、标准卸载 |
+| 绿色免安装版 | `Yaoheng-4.0.0-Windows-x64-Portable.zip` | 解压即用，适合 D 盘、移动硬盘或 U 盘 |
 | 校验清单 | `SHA256SUMS.txt` | 核对安装版与绿色版的 SHA-256 |
 
 系统要求：64 位 Windows 10 或 Windows 11。实时汇率、趋势与 C2C 报价需要网络；断网时普通行情会尽量使用最近一次可信缓存。
@@ -36,8 +36,8 @@
 > 安装包暂未使用商业代码签名证书。Windows SmartScreen 首次运行时可能显示“未知发布者”。请只从本仓库 Release 下载并核对 SHA-256。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.3-Windows-x64-Setup.exe"
-Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.3-Windows-x64-Portable.zip"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-4.0.0-Windows-x64-Setup.exe"
+Get-FileHash -Algorithm SHA256 ".\Yaoheng-4.0.0-Windows-x64-Portable.zip"
 ```
 
 ## 功能
@@ -56,6 +56,17 @@ Get-FileHash -Algorithm SHA256 ".\Yaoheng-3.21.3-Windows-x64-Portable.zip"
 | 外观主题 | 28 套全新深浅配色；每套扩展到 50 余项语义颜色并明确使用白色或黑色正文，可收展色块画廊并从侧栏向前或向后顺序切换 |
 | 响应式界面 | 侧栏、七币卡片、三端参考区、行情面板和设置卡片会随窗口宽度自动收缩、换列或上下重排 |
 | 可靠性 | Windows 单实例与重复启动唤醒、标题栏 `×` 直接退出、批量精确换算引擎复用、原子缓存/设置和旧结果隔离 |
+
+## V4 架构与切页性能
+
+V4 将应用服务、Tk 异步回调、页面生命周期和列表绘制拆成独立层。计算、汇率、C2C 与本机 API 仍由各自的业务核心负责；窗口只协调可见页面，不在主线程等待网络或缓存落盘。
+
+- 页面只在首次使用时创建，之后复用同一个页面实例；首次打开较复杂页面会先显示同主题加载状态。
+- 后台行情完成后立即更新当前可见页面。隐藏页面只保留最新快照，进入时才呈现；快速连续刷新会合并，不会让六页在同一帧争抢主线程。
+- 法币和虚拟币长列表按币种键更新变化的行，不再整表清空与重插，因此选中项、滚动位置及无变化的行保持稳定。
+- 七币种页进入后再安排报价更新；设置中的 28 套主题色块只在展开画廊时创建。缓存原子写仍然保留，但不再占用换算状态锁。
+
+在隐藏 Tk 窗口、196 条缓存汇率的本地基准中，已经打开过的八个页面再次切换约为 2–4 ms；当前页面不依赖汇率时，一整批新快照的分发约为 0.01 ms。首次打开页面仍需一次性创建控件，具体耗时随机器与页面复杂度变化。这是开发机计时，不是所有设备上的延迟保证。
 
 ## 主题与配色
 
@@ -174,14 +185,14 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 构建脚本会创建隔离环境、安装完整锁定依赖、检查运行时/语法、运行全部测试、构建 PyInstaller 文件夹版和 Inno Setup 安装器，并扫描设置、缓存、令牌、迁移备份、本机路径与常见秘密特征。最终输出：
 
 - `release\曜衡\曜衡.exe`
-- `release\Yaoheng-3.21.3-Windows-x64-Portable.zip`
-- `release\Yaoheng-3.21.3-Windows-x64-Setup.exe`
+- `release\Yaoheng-4.0.0-Windows-x64-Portable.zip`
+- `release\Yaoheng-4.0.0-Windows-x64-Setup.exe`
 - `release\SHA256SUMS.txt`
 
 发布前可在随机系统临时目录复验覆盖升级、用户数据保留和打包后单实例；测试使用独立安装身份，不会改动真实曜衡安装：
 
 ```powershell
-.\tools\smoke_upgrade.ps1 -PreviousVersion 3.21.1
+.\tools\smoke_upgrade.ps1 -PreviousVersion 3.21.3
 ```
 
 ## 项目结构
@@ -189,6 +200,10 @@ $env:YAO_HENG_PYTHON = "C:\Path\To\Python313\python.exe"
 ```text
 main.py                  程序入口
 app_ui.py                主窗口、页面与交互
+app_services.py          本机应用服务组合与 C2C 门面
+ui_async.py              Tk 主线程任务与异步结果桥接
+ui_runtime.py            页面生命周期与行情快照分发
+ui_table.py              稳定列表差量更新
 calculator_core.py       计算核心
 conversion_core.py       十进制精确换算
 exchange_page.py         七币种状态与路由

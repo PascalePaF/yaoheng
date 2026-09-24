@@ -300,7 +300,7 @@ class ExchangePageV319TkTests(unittest.TestCase):
                 app._page_open_refresh_enabled = False
                 snapshot = ui_snapshot()
                 app.service.snapshot = snapshot
-                page = app.pages["exchange"]
+                page = app.ensure_page("exchange")
                 self.assertIsInstance(page, ExchangePage)
                 page.apply_snapshot(snapshot)
                 app.show_page("exchange")
@@ -313,7 +313,7 @@ class ExchangePageV319TkTests(unittest.TestCase):
                 self.assertEqual(int(grid["columnspan"]), page._card_columns)
                 self.assertEqual(page.primary_entry.cget("justify"), "left")
                 self.assertTrue(all(isinstance(selector, SearchSelect) for selector in page.currency_selectors.values()))
-                settings_page = app.pages["settings"]
+                settings_page = app.ensure_page("settings")
                 self.assertEqual(settings_page.update_check_button.cget("text"), "检查更新")
                 self.assertEqual(settings_page.update_install_button.cget("text"), "下载并升级")
 

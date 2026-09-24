@@ -50,16 +50,18 @@ class ThemePalettePickerTkTests(unittest.TestCase):
 
         self.assertFalse(picker.expanded)
         self.assertEqual(picker.gallery.winfo_manager(), "")
+        self.assertEqual(len(picker.rows), 0)
+
+        picker.toggle()
+        self.root.update_idletasks()
+        self.assertTrue(picker.expanded)
+        self.assertEqual(picker.gallery.winfo_manager(), "pack")
         self.assertEqual(len(picker.rows), len(THEMES))
         row, swatch, label, _source, marker = picker.rows["dark"]
         self.assertIsInstance(swatch, tk.Canvas)
         self.assertEqual(label.cget("text"), THEME_LABELS["dark"])
         self.assertEqual(marker.cget("text"), "当前")
 
-        picker.toggle()
-        self.root.update_idletasks()
-        self.assertTrue(picker.expanded)
-        self.assertEqual(picker.gallery.winfo_manager(), "pack")
         self.assertEqual(int(row.grid_info()["column"]), 0)
 
         next_theme = tuple(THEMES)[1]

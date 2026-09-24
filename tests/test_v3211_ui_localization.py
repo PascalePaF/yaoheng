@@ -130,7 +130,7 @@ class FullWindowV3211TkTests(unittest.TestCase):
                     self.assertEqual(app.on_key(event), "break")
                 self.assertEqual(calculator.model.expression, "7")
 
-                settings_page = app.pages["settings"]
+                settings_page = app.ensure_page("settings")
                 settings_row = int(app.nav_buttons["settings"].grid_info()["row"])
                 theme_row = int(app.sidebar_theme_button.grid_info()["row"])
                 self.assertGreater(theme_row, settings_row)
@@ -145,7 +145,7 @@ class FullWindowV3211TkTests(unittest.TestCase):
                 app._responsive_window_changed(SimpleNamespace(widget=app.root, width=1400))
                 self.assertEqual(int(app.sidebar.cget("width")), 216)
 
-                exchange = app.pages["exchange"]
+                exchange = app.ensure_page("exchange")
                 self.assertIsInstance(exchange, ExchangePage)
                 exchange._canvas_resized(SimpleNamespace(width=520))
                 self.assertEqual(exchange._card_columns, 1)
@@ -159,13 +159,13 @@ class FullWindowV3211TkTests(unittest.TestCase):
                 settings_page._settings_canvas_resized(SimpleNamespace(width=1000))
                 self.assertTrue(any(int(card.grid_info()["column"]) == 1 for card, *_ in settings_page._settings_cards))
 
-                fiat = app.pages["fiat"]
+                fiat = app.ensure_page("fiat")
                 fiat._responsive_reference_controls(SimpleNamespace(width=500))
                 self.assertEqual(int(fiat.reference_amount_entry.grid_info()["row"]), 1)
                 fiat._responsive_reference_controls(SimpleNamespace(width=700))
                 self.assertEqual(int(fiat.reference_amount_entry.grid_info()["row"]), 0)
 
-                market = app.pages["fiat_market"]
+                market = app.ensure_page("fiat_market")
                 self.assertIsInstance(market, MarketPage)
                 market._market_body_resized(SimpleNamespace(width=700))
                 self.assertTrue(market.market_compact)

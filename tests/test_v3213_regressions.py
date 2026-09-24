@@ -11,6 +11,7 @@ from calculator_core import CalculatorModel
 from localization import tr
 from rate_service import RateService, RateSnapshot
 from settings_service import AppSettings, SettingsStore
+from ui_runtime import PageHost
 
 
 class V3213StateAndNavigationTests(unittest.TestCase):
@@ -25,7 +26,14 @@ class V3213StateAndNavigationTests(unittest.TestCase):
         app.root._active_search_select = None
         app.settings = SimpleNamespace(remember_last_page=True, last_page="calculator")
         app.settings_store = MagicMock()
-        app.pages = {"calculator": MagicMock(), "fiat": MagicMock()}
+        app.page_host = PageHost(
+            {"calculator": MagicMock, "fiat": MagicMock},
+            lambda _page: None,
+            lambda *_args: None,
+        )
+        app.pages = app.page_host.pages
+        app.page_host.ensure("calculator")
+        app.page_host.ensure("fiat")
         app.nav_buttons = {}
         app.current_page = "calculator"
         app.history_open = False
@@ -84,27 +92,39 @@ class V3213StateAndNavigationTests(unittest.TestCase):
 
     def test_fiat_refresh_updates_mixed_dependencies_without_animation(self):
         app = object.__new__(YaohengApp)
-        app.pages = {
-            name: MagicMock()
-            for name in ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
-        }
+        app.current_page = "fiat"
+        app.page_host = PageHost(
+            {name: MagicMock for name in ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")},
+            lambda _page: None,
+            app._present_rate_page,
+        )
+        for name in app.page_host.factories:
+            app.page_host.ensure(name)
+        app.pages = app.page_host.pages
         snapshot = MagicMock()
 
         YaohengApp.apply_snapshot(app, snapshot, False, animated=False, section="fiat")
 
-        for name in ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market"):
-            app.pages[name].apply_snapshot.assert_called_once_with(snapshot, False, False)
+        app.pages["fiat"].apply_snapshot.assert_called_once_with(snapshot, False, False)
+        for name in ("exchange", "market_exchange", "fiat_market", "crypto", "market"):
+            app.pages[name].apply_snapshot.assert_not_called()
+        self.assertEqual(len(app.page_host.pending_names()), 5)
 
     def test_hidden_market_page_does_not_start_chart_reload(self):
         app = object.__new__(YaohengApp)
         page = object.__new__(MarketPage)
         page.visible = False
         page.apply_snapshot = MagicMock()
-        app.pages = {"market": page}
+        app.current_page = "calculator"
+        app.page_host = PageHost({"market": lambda: page}, lambda _page: None, app._present_rate_page)
+        app.page_host.ensure("market")
+        app.pages = app.page_host.pages
         snapshot = MagicMock()
 
         YaohengApp.apply_snapshot(app, snapshot, False, animated=False, section="crypto")
 
+        page.apply_snapshot.assert_not_called()
+        app.page_host.present_pending("market")
         page.apply_snapshot.assert_called_once_with(
             snapshot, False, False, reload_chart=False
         )

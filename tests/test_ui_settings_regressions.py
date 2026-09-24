@@ -26,6 +26,7 @@ from app_ui import (
     visible_window_position,
 )
 from settings_service import MAX_SETTINGS_FILE_BYTES, AppSettings, SettingsStore, timezone_names
+from ui_runtime import PageHost
 
 
 class FakeAfterOwner:
@@ -143,18 +144,29 @@ class TkTaskRegressionTests(unittest.TestCase):
             return page
 
         app = YaohengApp.__new__(YaohengApp)
-        app.pages = {
+        pages = {
             "fiat": Page(),
             "fiat_market": market_page("fiat_market", True),
             "crypto": Page(),
             "market": market_page("market", False),
         }
+        app.current_page = "fiat_market"
+        app.page_host = PageHost(
+            {name: (lambda page=page: page) for name, page in pages.items()},
+            lambda _page: None,
+            app._present_rate_page,
+        )
+        for name in pages:
+            app.page_host.ensure(name)
+        app.pages = app.page_host.pages
 
         YaohengApp.apply_snapshot(app, object(), False, section="fiat")
 
-        self.assertEqual(app.pages["fiat"].calls, 1)
-        self.assertEqual(app.pages["crypto"].calls, 1)
+        self.assertEqual(app.pages["fiat"].calls, 0)
+        self.assertEqual(app.pages["crypto"].calls, 0)
         self.assertEqual(chart_reloads["fiat_market"], [True])
+        self.assertEqual(chart_reloads["market"], [])
+        app.page_host.present_pending("market")
         self.assertEqual(chart_reloads["market"], [False])
 
     def test_manual_refresh_for_other_section_is_queued(self):

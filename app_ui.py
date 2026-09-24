@@ -14,14 +14,13 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from queue import Empty, SimpleQueue
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from app_version import APP_VERSION
 from calculator_core import CalculationError, CalculatorModel, evaluate_basic_amount, format_number
-from c2c import BinanceP2PAdapter, C2CQuoteService, OkxP2PAdapter
+from app_services import AppC2CService
 from command_service import CommandService
 from exchange_page import (
     PAYMENT_ALL_LABEL,
@@ -53,6 +52,9 @@ from secret_store import SecretAlreadyExistsError, SecretStore, SecretStoreError
 from settings_service import AppSettings, SettingsStore, timezone_names
 from theme_catalog import THEME_LABELS, THEME_SOURCES, THEMES, theme_label
 from update_service import DownloadedUpdate, GitHubUpdateService, UpdateError, UpdateInfo
+from ui_async import TkAfterJobs, TkResultBridge
+from ui_runtime import PageHost, SnapshotUpdate, affected_rate_pages
+from ui_table import reconcile_rows, sort_financial_rows
 
 
 DisplayStringVar = install_tk_localization(tk, ttk, messagebox, filedialog)
@@ -199,182 +201,6 @@ def set_windows_window_icon(root: tk.Tk, icon_path: Path) -> list[int]:
         return [int(small_handle), int(big_handle)]
     except (AttributeError, OSError, tk.TclError):
         return []
-
-
-class TkResultBridge:
-    """Move worker results to Tk without invoking any Tcl command off-thread."""
-
-    def __init__(
-        self,
-        owner: tk.Misc,
-        callback: Callable[..., None],
-        poll_ms: int = 25,
-    ) -> None:
-        self.owner = owner
-        self.callback = callback
-        self.poll_ms = max(1, poll_ms)
-        self._poll_delay = self.poll_ms
-        self._results: SimpleQueue[tuple[object, ...]] = SimpleQueue()
-        self._pending = 0
-        self._poll_job: str | None = None
-        self._closed = False
-
-    def expect(self) -> None:
-        if self._closed:
-            return
-        self._pending += 1
-        self._ensure_poll()
-
-    def deliver(self, *payload: object) -> None:
-        if not self._closed:
-            self._results.put(payload)
-
-    def _ensure_poll(self) -> None:
-        if self._closed or self._poll_job is not None:
-            return
-        try:
-            self._poll_job = self.owner.after(self._poll_delay, self._poll)
-        except tk.TclError:
-            self.close()
-
-    def _poll(self) -> None:
-        self._poll_job = None
-        if self._closed:
-            return
-        delivered = False
-        while self._pending:
-            try:
-                payload = self._results.get_nowait()
-            except Empty:
-                break
-            self._pending -= 1
-            delivered = True
-            try:
-                self.callback(*payload)
-            except Exception:
-                # Tk will report the original callback exception. Keep polling
-                # separately so one bad result cannot strand later deliveries.
-                self._poll_delay = self.poll_ms
-                if self._pending and not self._closed:
-                    self._ensure_poll()
-                raise
-            if self._closed:
-                return
-        if self._pending:
-            self._poll_delay = self.poll_ms if delivered else min(250, max(self.poll_ms, self._poll_delay * 2))
-            self._ensure_poll()
-        else:
-            self._poll_delay = self.poll_ms
-
-    def close(self) -> None:
-        self._closed = True
-        self._pending = 0
-        if self._poll_job is not None:
-            try:
-                self.owner.after_cancel(self._poll_job)
-            except tk.TclError:
-                pass
-            self._poll_job = None
-
-
-class TkAfterJobs:
-    """Own short-lived Tk callbacks so widget destruction can cancel them cleanly."""
-
-    def __init__(self, owner: tk.Misc) -> None:
-        self.owner = owner
-        self.jobs: set[str] = set()
-        self.closed = False
-
-    def schedule(self, delay: int, callback: Callable[[], None], idle: bool = False) -> str | None:
-        if self.closed:
-            return None
-        holder: list[str] = []
-
-        def run() -> None:
-            if holder:
-                self.jobs.discard(holder[0])
-            if not self.closed:
-                callback()
-
-        try:
-            job = self.owner.after_idle(run) if idle else self.owner.after(delay, run)
-        except tk.TclError:
-            return None
-        holder.append(job)
-        self.jobs.add(job)
-        return job
-
-    def cancel_all(self) -> None:
-        self.closed = True
-        for job in tuple(self.jobs):
-            try:
-                self.owner.after_cancel(job)
-            except tk.TclError:
-                pass
-        self.jobs.clear()
-
-
-class AppC2CService:
-    """Application facade that keeps adapters private and UI parsing-free."""
-
-    def __init__(self, rate_service: RateService) -> None:
-        self.rate_service = rate_service
-        self.providers = {
-            "binance": BinanceP2PAdapter(),
-            "okx": OkxP2PAdapter(),
-        }
-        self.service = C2CQuoteService(
-            self.providers,
-            market_fallback=self._market_fallback,
-        )
-
-    def _market_fallback(self, request: object) -> dict[str, str]:
-        asset = str(getattr(request, "asset", ""))
-        fiat = str(getattr(request, "fiat", ""))
-        return {
-            "price": self.rate_service.convert_exact("1", asset, fiat),
-            "source": "ordinary_market",
-        }
-
-    def quote(self, request: object, *, cancel: object | None = None) -> object:
-        return self.service.quote(request, cancel=cancel)  # type: ignore[arg-type]
-
-    def capabilities(self) -> object:
-        return self.service.capabilities()
-
-    def clear_memory_cache(self) -> None:
-        self.service.clear_memory_cache()
-
-    def payment_methods(self, provider: str, fiat: str) -> tuple[object, ...]:
-        """Fetch official provider identifiers; callers run this off the Tk thread."""
-
-        selected = str(provider or "auto").lower()
-        candidates = (
-            tuple(self.providers.values())
-            if selected == "auto"
-            else (self.providers.get(selected),)
-        )
-        methods: list[object] = []
-        identifiers: set[str] = set()
-        for adapter in candidates:
-            if adapter is None:
-                continue
-            capability = adapter.capability
-            if not capability.enabled or not capability.configured or not capability.trade_methods:
-                continue
-            loader = getattr(adapter, "list_trade_methods", None)
-            if not callable(loader):
-                continue
-            try:
-                rows = tuple(loader(fiat))
-            except Exception:
-                continue
-            for row in rows:
-                identifier = str(getattr(row, "identifier", ""))
-                if identifier and identifier not in identifiers:
-                    identifiers.add(identifier)
-                    methods.append(row)
-        return tuple(methods)
 
 
 class AppButton(tk.Button):
@@ -916,6 +742,16 @@ class ThemePalettePicker(tk.Frame):
         self.gallery = tk.Frame(self, bg=COLORS["card"])
         self.gallery.grid_columnconfigure(0, weight=1, uniform="theme_gallery")
         self.gallery.grid_columnconfigure(1, weight=1, uniform="theme_gallery")
+
+        for widget in (self.header, self.header_swatch, self.header_name, self.header_source):
+            widget.bind("<Button-1>", lambda _event: self.toggle(), add="+")
+        self.header.bind("<Return>", lambda _event: self.toggle())
+        self.header.bind("<space>", lambda _event: self.toggle())
+        self.apply_theme()
+
+    def _build_gallery_rows(self) -> None:
+        if self.rows:
+            return
         for index, name in enumerate(THEMES):
             row = tk.Frame(
                 self.gallery,
@@ -982,12 +818,6 @@ class ThemePalettePicker(tk.Frame):
             row.bind("<Return>", lambda _event, selected=name: self.choose(selected))
             row.bind("<space>", lambda _event, selected=name: self.choose(selected))
 
-        for widget in (self.header, self.header_swatch, self.header_name, self.header_source):
-            widget.bind("<Button-1>", lambda _event: self.toggle(), add="+")
-        self.header.bind("<Return>", lambda _event: self.toggle())
-        self.header.bind("<space>", lambda _event: self.toggle())
-        self.apply_theme()
-
     @staticmethod
     def _draw_swatch(canvas: tk.Canvas, palette: Mapping[str, str]) -> None:
         canvas.delete("all")
@@ -1003,6 +833,7 @@ class ThemePalettePicker(tk.Frame):
     def toggle(self) -> str:
         self.expanded = not self.expanded
         if self.expanded:
+            self._build_gallery_rows()
             self.gallery.pack(fill="x", padx=10, pady=(10, 3))
             self._apply_row_theme()
         else:
@@ -1811,6 +1642,7 @@ class DualConverterPage(tk.Frame):
         self.action_fade_generation = 0
         self.after_jobs = TkAfterJobs(self)
         self.sort_reverse: dict[str, bool] = {}
+        self.active_sort: tuple[str, bool, bool] | None = None
         self.refreshing = False
         self.spinner_job: str | None = None
         self._build()
@@ -2606,8 +2438,14 @@ class DualConverterPage(tk.Frame):
         self.rate_var.set(f"参考表当前按 {self._format(amount)} {base} 换算为列表中的币种数量")
         self.table_default_rows = list(rows)
         self.table_rows = list(rows)
-        self.sort_reverse.clear()
-        self._set_table_heading_arrows()
+        active_sort = getattr(self, "active_sort", None)
+        if active_sort is not None:
+            column, numeric, reverse = active_sort
+            index = {"code": 0, "name": 1, "rate": 2, "change": 3, "region": 4}[column]
+            self.table_rows = sort_financial_rows(self.table_rows, index, numeric=numeric, reverse=reverse)
+            self._set_table_heading_arrows(column, "↓" if reverse else "↑")
+        else:
+            self._set_table_heading_arrows()
         self._render_rows(animate)
 
     def _filtered_rows(self) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
@@ -2640,10 +2478,10 @@ class DualConverterPage(tk.Frame):
         self.table.heading("pin", text="置顶")
 
     def _render_rows(self, animate: bool = False) -> None:
+        del animate
         if not hasattr(self, "table"):
             return
         self.render_generation += 1
-        generation = self.render_generation
         if self.render_job is not None:
             try:
                 self.after_cancel(self.render_job)
@@ -2652,30 +2490,20 @@ class DualConverterPage(tk.Frame):
             self.render_job = None
         self._hide_action_buttons()
         self._set_action_headings()
-        self.table.delete(*self.table.get_children())
-        self.table_item_codes.clear()
         rows = self._filtered_rows()
         by_code = {row[0][0]: row for row in rows}
         pinned_rows = [by_code[code] for code in self.pinned_codes if code in by_code]
-        display_rows = [(row, True) for row in pinned_rows] + [(row, False) for row in rows]
-        if not animate:
-            for (values, tags), pinned_copy in display_rows:
-                item = self.table.insert("", tk.END, values=values, tags=tags + (("pinned_copy",) if pinned_copy else ()))
-                self.table_item_codes[item] = values[0]
-            return
-
-        def add(index: int = 0) -> None:
-            self.render_job = None
-            if generation != self.render_generation or index >= len(display_rows):
-                return
-            next_index = min(index + 8, len(display_rows))
-            for (values, tags), pinned_copy in display_rows[index:next_index]:
-                item = self.table.insert("", tk.END, values=values, tags=tags + (("pinned_copy",) if pinned_copy else ()))
-                self.table_item_codes[item] = values[0]
-            if next_index < len(display_rows):
-                self.render_job = self.after(12, lambda: add(next_index))
-
-        add()
+        display_rows = [
+            (values, tags + ("pinned_copy",)) for values, tags in pinned_rows
+        ] + rows
+        items = reconcile_rows(
+            self.table,
+            display_rows,
+            lambda values, tags: f"{'pin' if 'pinned_copy' in tags else 'row'}:{values[0]}",
+        )
+        self.table_item_codes = {
+            item_id: row_key.split(":", 1)[1] for item_id, row_key in items.items()
+        }
 
     def sort_table(self, column: str, numeric: bool) -> None:
         reverse = self.sort_reverse.get(column, False)
@@ -2683,35 +2511,16 @@ class DualConverterPage(tk.Frame):
         for other in tuple(self.sort_reverse):
             if other != column:
                 self.sort_reverse.pop(other, None)
+        self.active_sort = (column, numeric, reverse)
         index = {"code": 0, "name": 1, "rate": 2, "change": 3, "region": 4}[column]
-
-        def key(row: tuple[tuple[str, ...], tuple[str, ...]]):
-            value = row[0][index]
-            return value.casefold()
-
-        if numeric:
-            valued_rows: list[tuple[float, tuple[tuple[str, ...], tuple[str, ...]]]] = []
-            missing_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-            for row in self.table_rows:
-                value = row[0][index]
-                try:
-                    number = float(value.replace(",", "").replace("%", "").replace("+", ""))
-                    if not math.isfinite(number):
-                        raise ValueError
-                except ValueError:
-                    missing_rows.append(row)
-                else:
-                    valued_rows.append((number, row))
-            valued_rows.sort(key=lambda item: item[0], reverse=reverse)
-            self.table_rows = [row for _number, row in valued_rows] + missing_rows
-        else:
-            self.table_rows.sort(key=key, reverse=reverse)
+        self.table_rows = sort_financial_rows(self.table_rows, index, numeric=numeric, reverse=reverse)
         self._set_table_heading_arrows(column, "↓" if reverse else "↑")
         self._render_rows(False)
 
     def reset_table_order(self) -> None:
         self.table_rows = list(self.table_default_rows)
         self.sort_reverse.clear()
+        self.active_sort = None
         self.favorites_only = False
         self.search_var.set("")
         self._set_table_heading_arrows()
@@ -3026,6 +2835,7 @@ class MarketPage(tk.Frame):
         self.watch_render_generation = 0
         self.watch_render_job: str | None = None
         self.watch_sort_reverse: dict[str, bool] = {}
+        self.active_watch_sort: tuple[str, bool, bool] | None = None
         self.day_buttons: dict[int, tk.Button] = {}
         self.chart_generation = 0
         self.chart_load_job: str | None = None
@@ -3365,40 +3175,34 @@ class MarketPage(tk.Frame):
                 rows.append(((code, name, self.compact(price), change_text), tags))
         self.watch_default_rows = list(rows)
         self.watch_rows = list(rows)
-        self.watch_sort_reverse.clear()
-        self._set_watch_heading_arrows()
+        active_sort = getattr(self, "active_watch_sort", None)
+        if active_sort is not None:
+            column, numeric, reverse = active_sort
+            index = {"code": 0, "name": 1, "price": 2, "change": 3}[column]
+            self.watch_rows = sort_financial_rows(
+                self.watch_rows, index, numeric=numeric, reverse=reverse, compact=True
+            )
+            self._set_watch_heading_arrows(column, "↓" if reverse else "↑")
+        else:
+            self._set_watch_heading_arrows()
         self._render_watch(animated)
 
     def _render_watch(self, animated: bool = False) -> None:
+        del animated
         self.watch_render_generation += 1
-        generation = self.watch_render_generation
         if self.watch_render_job is not None:
             try:
                 self.after_cancel(self.watch_render_job)
             except tk.TclError:
                 pass
             self.watch_render_job = None
-        self.watch_table.delete(*self.watch_table.get_children())
         query = self.market_search_var.get().strip().lower()
         if "·" in query:
             query = query.split("·", 1)[0].strip()
         rows = [row for row in self.watch_rows if not query or any(query in str(value).lower() for value in row[0][:2]) or query in self.service.snapshot.names.get(row[0][0], "").lower()]
-        if not animated:
-            for values, tags in rows:
-                self.watch_table.insert("", tk.END, values=values, tags=tags)
-            return
-
-        def add(index: int = 0) -> None:
-            self.watch_render_job = None
-            if generation != self.watch_render_generation or index >= len(rows):
-                return
-            next_index = min(index + 8, len(rows))
-            for values, tags in rows[index:next_index]:
-                self.watch_table.insert("", tk.END, values=values, tags=tags)
-            if next_index < len(rows):
-                self.watch_render_job = self.after(12, lambda: add(next_index))
-
-        add()
+        reconcile_rows(
+            self.watch_table, rows, lambda values, _tags: values[0]
+        )
 
     def _watch_yview(self, *args) -> None:
         self.watch_table.yview(*args)
@@ -3418,44 +3222,18 @@ class MarketPage(tk.Frame):
         for other in tuple(self.watch_sort_reverse):
             if other != column:
                 self.watch_sort_reverse.pop(other, None)
+        self.active_watch_sort = (column, numeric, reverse)
         index = {"code": 0, "name": 1, "price": 2, "change": 3}[column]
-
-        def key(row: tuple[tuple[str, ...], tuple[str, ...]]):
-            value = row[0][index]
-            return value.casefold()
-
-        def number(row: tuple[tuple[str, ...], tuple[str, ...]]) -> float | None:
-            value = row[0][index]
-            scale = 1.0
-            if value.endswith("K"):
-                scale, value = 1_000.0, value[:-1]
-            elif value.endswith("M"):
-                scale, value = 1_000_000.0, value[:-1]
-            try:
-                result = float(value.replace("%", "").replace("+", "")) * scale
-            except ValueError:
-                return None
-            return result if math.isfinite(result) else None
-
-        if numeric:
-            valued_rows: list[tuple[float, tuple[tuple[str, ...], tuple[str, ...]]]] = []
-            missing_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-            for row in self.watch_rows:
-                value = number(row)
-                if value is None:
-                    missing_rows.append(row)
-                else:
-                    valued_rows.append((value, row))
-            valued_rows.sort(key=lambda item: item[0], reverse=reverse)
-            self.watch_rows = [row for _number, row in valued_rows] + missing_rows
-        else:
-            self.watch_rows.sort(key=key, reverse=reverse)
+        self.watch_rows = sort_financial_rows(
+            self.watch_rows, index, numeric=numeric, reverse=reverse, compact=True
+        )
         self._set_watch_heading_arrows(column, "↓" if reverse else "↑")
         self._render_watch(False)
 
     def reset_watch_order(self) -> None:
         self.watch_rows = list(self.watch_default_rows)
         self.watch_sort_reverse.clear()
+        self.active_watch_sort = None
         self._set_watch_heading_arrows()
         self._render_watch(False)
 
@@ -4499,6 +4277,8 @@ class YaohengApp:
         self.auto_jobs: dict[str, str | None] = {"fiat": None, "crypto": None}
         self.startup_job: str | None = None
         self.page_open_refresh_job: str | None = None
+        self._navigation_job: str | None = None
+        self._navigation_target = ""
         self._page_open_refresh_enabled = False
         self.geometry_job: str | None = None
         self.exiting = False
@@ -4510,12 +4290,15 @@ class YaohengApp:
         self._themed_palette_pickers: list[ThemePalettePicker] = []
         self._themed_calculator_keys: list[tuple[CalculatorKey, str | None]] = []
         self._theme_idle_job: str | None = None
+        self._theme_binding_job: str | None = None
+        self._theme_bindings_ready = False
         self.rate_results = TkResultBridge(self.root, self._finish_rates)
         self._styles()
         self._shell()
-        self._prepare_theme_bindings(dict(COLORS))
         start_page = self.settings.last_page if self.settings.remember_last_page else self.settings.startup_page
-        self.show_page(start_page if start_page in self.pages else "calculator")
+        self.show_page(start_page if start_page in self.page_host.factories else "calculator")
+        self._prepare_theme_bindings(dict(COLORS))
+        self._theme_bindings_ready = True
         self._page_open_refresh_enabled = True
         self.root.bind_all("<KeyPress>", self.on_key, add="+")
         self.root.bind("<Configure>", self._queue_geometry_save, add="+")
@@ -4642,7 +4425,7 @@ class YaohengApp:
         }
         for row, (key, text, font_size, left_pad) in enumerate(items, start=1):
             button = tk.Button(
-                self.sidebar, text=text, command=lambda page=key: self.show_page(page), anchor="w",
+                self.sidebar, text=text, command=lambda page=key: self.navigate(page), anchor="w",
                 bg=COLORS["sidebar"], fg=COLORS["sidebar_muted"], activebackground=COLORS["nav_hover"],
                 activeforeground=COLORS["sidebar_text"], relief="flat", bd=0, highlightthickness=0,
                 font=(FONT, font_size, "bold"), padx=left_pad, pady=(10 if font_size < 11 else 13), cursor="hand2",
@@ -4693,88 +4476,155 @@ class YaohengApp:
         content.grid(row=0, column=1, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
+        self.loading_overlay = tk.Frame(content, bg=COLORS["bg"])
+        loading_card = tk.Frame(self.loading_overlay, bg=COLORS["card"])
+        loading_card.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(
+            loading_card, text="正在加载…", bg=COLORS["card"], fg=COLORS["text"],
+            font=(FONT, 17, "bold"), padx=42, pady=24,
+        ).pack()
         calc_mode = self.settings.last_calculator_mode if self.settings.remember_calculator_mode else self.settings.default_calculator_mode
         history = [tuple(item[:2]) for item in self.settings.calculator_history] if self.settings.retain_history else []
-        self.pages["calculator"] = CalculatorPage(
-            content, self.toggle_history, self.calculator_history_changed,
-            initial_professional=calc_mode == "professional", mode_changed=self.calculator_mode_changed,
-            angle_mode=self.settings.calculator_angle_mode, history_limit=self.settings.history_limit,
-            initial_history=history, copy_result_format=self.settings.copy_result_format,
+
+        def make_calculator() -> CalculatorPage:
+            return CalculatorPage(
+                content, self.toggle_history, self.calculator_history_changed,
+                initial_professional=calc_mode == "professional", mode_changed=self.calculator_mode_changed,
+                angle_mode=self.settings.calculator_angle_mode, history_limit=self.settings.history_limit,
+                initial_history=history, copy_result_format=self.settings.copy_result_format,
+            )
+
+        def make_exchange(key: str, mode: str, title: str) -> ExchangePage:
+            return ExchangePage(
+                content,
+                self.exchange_coordinator,
+                ExchangePageState.from_mapping(self.settings.pages.get(key)),
+                self.refresh_rates,
+                lambda state: self.save_page_state(key, state),
+                self.format_timestamp,
+                colors=COLORS,
+                font_name=FONT,
+                currency_selector_factory=SearchSelect,
+                fixed_mode=mode,
+                page_title=title,
+            )
+
+        def make_converter(key: str) -> DualConverterPage:
+            fiat = key == "fiat"
+            return DualConverterPage(
+                content, self.service, "fiat" if fiat else "crypto", self.refresh_rates, self.format_timestamp,
+                self.settings.favorite_fiats if fiat else self.settings.favorite_cryptos,
+                self.settings.pinned_fiats if fiat else self.settings.pinned_cryptos,
+                self.save_currency_preferences,
+                coordinator=self.exchange_coordinator if fiat else None,
+                page_state=self.settings.pages.get(key),
+                state_callback=lambda state: self.save_page_state(key, state),
+            )
+
+        def make_market(key: str) -> MarketPage:
+            mode = "fiat" if key == "fiat_market" else "crypto"
+            return MarketPage(
+                content, self.service, self.refresh_rates, self.format_timestamp, mode,
+                self.format_chart_timestamp,
+                page_state=self.settings.pages.get(key),
+                state_callback=lambda state: self.save_page_state(key, state),
+            )
+
+        def make_settings() -> SettingsPage:
+            return SettingsPage(
+                content, self.settings, self.set_theme, self.set_language, self.set_timezone, self.set_keep_data_with_app,
+                self.save_setting, self.choose_data_directory, self.migrate_application,
+                self.service.cache_size_bytes, self.clear_cache, self.export_settings, self.import_settings,
+                self.reset_settings, lambda: self.open_folder(portable_dir()),
+                lambda: self.open_folder(self.settings.resolved_data_dir()),
+                self.local_api_status,
+                self.set_local_api_enabled,
+                self.set_local_api_port,
+                self.issue_local_api_token,
+                self.test_local_api_connection,
+                self.check_application_update,
+                self.download_application_update,
+                self.install_application_update,
+                self.force_exit,
+            )
+
+        self.page_host: PageHost[tk.Frame] = PageHost(
+            {
+                "calculator": make_calculator,
+                "exchange": lambda: make_exchange("exchange", "c2c", "C2C 兑换"),
+                "market_exchange": lambda: make_exchange("market_exchange", "market", "市场兑换"),
+                "fiat": lambda: make_converter("fiat"),
+                "fiat_market": lambda: make_market("fiat_market"),
+                "crypto": lambda: make_converter("crypto"),
+                "market": lambda: make_market("market"),
+                "settings": make_settings,
+            },
+            lambda page: self._mount_page(page),
+            self._present_rate_page,
         )
-        self.pages["exchange"] = ExchangePage(
-            content,
-            self.exchange_coordinator,
-            ExchangePageState.from_mapping(self.settings.pages.get("exchange")),
-            self.refresh_rates,
-            lambda state: self.save_page_state("exchange", state),
-            self.format_timestamp,
-            colors=COLORS,
-            font_name=FONT,
-            currency_selector_factory=SearchSelect,
-            fixed_mode="c2c",
-            page_title="C2C 兑换",
-        )
-        self.pages["market_exchange"] = ExchangePage(
-            content,
-            self.exchange_coordinator,
-            ExchangePageState.from_mapping(self.settings.pages.get("market_exchange")),
-            self.refresh_rates,
-            lambda state: self.save_page_state("market_exchange", state),
-            self.format_timestamp,
-            colors=COLORS,
-            font_name=FONT,
-            currency_selector_factory=SearchSelect,
-            fixed_mode="market",
-            page_title="市场兑换",
-        )
-        self.pages["fiat"] = DualConverterPage(
-            content, self.service, "fiat", self.refresh_rates, self.format_timestamp,
-            self.settings.favorite_fiats, self.settings.pinned_fiats, self.save_currency_preferences,
-            coordinator=self.exchange_coordinator,
-            page_state=self.settings.pages.get("fiat"),
-            state_callback=lambda state: self.save_page_state("fiat", state),
-        )
-        self.pages["fiat_market"] = MarketPage(
-            content, self.service, self.refresh_rates, self.format_timestamp, "fiat",
-            self.format_chart_timestamp,
-            page_state=self.settings.pages.get("fiat_market"),
-            state_callback=lambda state: self.save_page_state("fiat_market", state),
-        )
-        self.pages["crypto"] = DualConverterPage(
-            content, self.service, "crypto", self.refresh_rates, self.format_timestamp,
-            self.settings.favorite_cryptos, self.settings.pinned_cryptos, self.save_currency_preferences,
-            coordinator=None,
-            page_state=self.settings.pages.get("crypto"),
-            state_callback=lambda state: self.save_page_state("crypto", state),
-        )
-        self.pages["market"] = MarketPage(
-            content, self.service, self.refresh_rates, self.format_timestamp, "crypto",
-            self.format_chart_timestamp,
-            page_state=self.settings.pages.get("market"),
-            state_callback=lambda state: self.save_page_state("market", state),
-        )
-        self.pages["settings"] = SettingsPage(
-            content, self.settings, self.set_theme, self.set_language, self.set_timezone, self.set_keep_data_with_app,
-            self.save_setting, self.choose_data_directory, self.migrate_application,
-            self.service.cache_size_bytes, self.clear_cache, self.export_settings, self.import_settings,
-            self.reset_settings, lambda: self.open_folder(portable_dir()),
-            lambda: self.open_folder(self.settings.resolved_data_dir()),
-            self.local_api_status,
-            self.set_local_api_enabled,
-            self.set_local_api_port,
-            self.issue_local_api_token,
-            self.test_local_api_connection,
-            self.check_application_update,
-            self.download_application_update,
-            self.install_application_update,
-            self.force_exit,
-        )
-        for page in self.pages.values():
-            page.grid(row=0, column=0, sticky="nsew")
+        self.pages = self.page_host.pages
 
         self.history_panel = HistoryPanel(self.root, self.use_history_result, self.clear_history)
         self.history_panel.grid(row=0, column=2, sticky="nsew")
         self.history_panel.grid_remove()
+
+    def _mount_page(self, page: tk.Frame) -> None:
+        page.grid(row=0, column=0, sticky="nsew")
+        if self._theme_bindings_ready:
+            self._queue_theme_bindings()
+
+    def _queue_theme_bindings(self) -> None:
+        if self._theme_binding_job is not None:
+            self.root.after_cancel(self._theme_binding_job)
+        self._theme_binding_job = self.root.after(80, self._refresh_theme_bindings)
+
+    def _refresh_theme_bindings(self) -> None:
+        self._theme_binding_job = None
+        if not self.exiting:
+            self._prepare_theme_bindings(dict(COLORS))
+
+    def ensure_page(self, page: str) -> tk.Frame:
+        instance = self.page_host.ensure(page)
+        self.page_host.present_pending(page)
+        return instance
+
+    def navigate(self, page: str) -> None:
+        """Paint a stable loading surface before constructing a cold page."""
+
+        if page not in self.page_host.factories:
+            return
+        if page in self.pages:
+            self.show_page(page)
+            return
+        if self._navigation_job is not None:
+            self.root.after_cancel(self._navigation_job)
+        self._navigation_target = page
+        self.loading_overlay.grid(row=0, column=0, sticky="nsew")
+        self.loading_overlay.tkraise()
+        self._navigation_job = self.root.after(24, self._finish_navigation)
+
+    def _finish_navigation(self) -> None:
+        self._navigation_job = None
+        page = self._navigation_target
+        self._navigation_target = ""
+        try:
+            self.show_page(page)
+        finally:
+            self.loading_overlay.grid_remove()
+
+    def _present_rate_page(
+        self, key: str, page: tk.Frame, update: SnapshotUpdate, visible: bool
+    ) -> None:
+        if isinstance(page, MarketPage):
+            reload_chart = (
+                visible and page.visible and
+                (update.section == "all" or
+                 (update.section == "fiat" and key == "fiat_market") or
+                 (update.section == "crypto" and key == "market"))
+            )
+            page.apply_snapshot(update.snapshot, update.from_cache, False, reload_chart=reload_chart)
+        elif hasattr(page, "apply_snapshot"):
+            page.apply_snapshot(update.snapshot, update.from_cache, False)
 
     def _draw_logo(self) -> None:
         self.logo_canvas.delete("all")
@@ -4850,12 +4700,26 @@ class YaohengApp:
             return "时间未知"
 
     def show_page(self, page: str) -> None:
+        if page not in self.page_host.factories:
+            return
+        navigation_job = getattr(self, "_navigation_job", None)
+        if navigation_job is not None:
+            self.root.after_cancel(navigation_job)
+            self._navigation_job = None
+        overlay = getattr(self, "loading_overlay", None)
+        if overlay is not None:
+            overlay.grid_remove()
         active = getattr(self.root, "_active_search_select", None)
         if active is not None:
             active.close()
         if page != "calculator" and self.history_open:
             self.toggle_history()
         changed = self.current_page != page
+        if not changed and page in self.pages:
+            if getattr(self, "_page_open_refresh_enabled", False):
+                self._queue_page_open_refresh(page)
+            return
+        current = self.ensure_page(page)
         previous = self.pages.get(self.current_page)
         if changed and hasattr(previous, "on_hide"):
             previous.on_hide()  # type: ignore[attr-defined]
@@ -4864,8 +4728,7 @@ class YaohengApp:
             self.settings.last_page = page
             # Debounced persistence keeps navigation independent from disk I/O.
             self.settings_store.schedule_save(self.settings)
-        self.pages[page].tkraise()
-        current = self.pages[page]
+        current.tkraise()
         if hasattr(current, "on_show"):
             current.on_show()  # type: ignore[attr-defined]
         for key, button in self.nav_buttons.items():
@@ -4946,9 +4809,10 @@ class YaohengApp:
         self.network_button.configure(text="●  正在重新连接…", state="disabled")
         scope_text = "货币" if section == "fiat" else "虚拟币" if section == "crypto" else "汇率与行情"
         self._set_network_status(None, f"正在获取最新{scope_text}")
-        page_keys = ("exchange", "market_exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
-        for key in page_keys:
-            page = self.pages.get(key)
+        # Hidden pages retain their last trusted view.  Only the visible page
+        # needs a loading indicator; all other views are updated on demand.
+        if self.current_page in affected_rate_pages(section):
+            page = self.pages.get(self.current_page)
             if hasattr(page, "begin_refresh"):
                 page.begin_refresh()  # type: ignore[attr-defined]
         def worker() -> None:
@@ -4966,6 +4830,10 @@ class YaohengApp:
             return
         self.loading_rates = False
         self.active_rate_section = None
+        # An overlapping refresh may commit a newer batch while this worker's
+        # result waits in the Tk bridge.  Never paint an older batch over it.
+        if snapshot is not None and self.service.snapshot is not snapshot:
+            snapshot = self.service.snapshot
         if snapshot:
             self.last_network_at = snapshot.fetched_at
             self.apply_snapshot(snapshot, False, animated=False, section=section)
@@ -4987,9 +4855,8 @@ class YaohengApp:
             if self.service.snapshot.rates:
                 self.apply_snapshot(self.service.snapshot, True, animated=False, section=section)
             else:
-                page_keys = ("exchange", "market_exchange", "fiat", "fiat_market") if section == "fiat" else ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
-                for key in page_keys:
-                    page = self.pages.get(key)
+                if self.current_page in affected_rate_pages(section):
+                    page = self.pages.get(self.current_page)
                     if hasattr(page, "finish_refresh_failure"):
                         page.finish_refresh_failure()  # type: ignore[attr-defined]
         if section == "all":
@@ -5056,28 +4923,8 @@ class YaohengApp:
         self.network_status.configure(bg=bg, fg=fg)
 
     def apply_snapshot(self, snapshot: RateSnapshot, from_cache: bool, animated: bool = False, section: str = "all") -> None:
-        keys = (
-            # The mixed crypto converter and crypto market also depend on fiat
-            # quote rates, so a fiat batch updates them without reloading a
-            # hidden chart.
-            ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market") if section == "fiat" else
-            ("exchange", "market_exchange", "crypto", "market") if section == "crypto" else
-            ("exchange", "market_exchange", "fiat", "fiat_market", "crypto", "market")
-        )
-        for key in keys:
-            page = self.pages.get(key)
-            if page is None:
-                continue
-            if isinstance(page, MarketPage):
-                reload_chart = (
-                    bool(getattr(page, "visible", False))
-                    and (section == "all"
-                    or (section == "fiat" and key == "fiat_market")
-                    or (section == "crypto" and key == "market"))
-                )
-                page.apply_snapshot(snapshot, from_cache, animated, reload_chart=reload_chart)
-            elif hasattr(page, "apply_snapshot"):
-                page.apply_snapshot(snapshot, from_cache, animated)  # type: ignore[attr-defined]
+        del animated
+        self.page_host.publish(snapshot, from_cache, section, self.current_page)
 
     def toggle_history(self) -> None:
         page = self.pages.get("calculator")
@@ -5401,7 +5248,7 @@ class YaohengApp:
         self.geometry_job = None
         if self.settings.remember_window_geometry and not self.history_open and self.root.state() == "normal":
             self.settings.window_geometry = self.root.geometry()
-            self._persist_settings(notify=False)
+            self.settings_store.schedule_save(self.settings)
 
     def on_close_request(self) -> None:
         # Title-bar × always means exit. Users can still use the normal OS
@@ -5458,7 +5305,7 @@ class YaohengApp:
         self.loading_rates = False
         self.active_rate_section = None
         self.pending_rate_section = None
-        for attr in ("startup_job", "page_open_refresh_job", "api_start_job", "geometry_job"):
+        for attr in ("startup_job", "page_open_refresh_job", "api_start_job", "geometry_job", "_theme_binding_job", "_navigation_job"):
             job = getattr(self, attr, None)
             if job:
                 try:
@@ -5743,6 +5590,10 @@ class YaohengApp:
     def set_theme(self, theme: str) -> None:
         if theme not in THEMES or theme == self.settings.theme:
             return
+        if self._theme_binding_job is not None:
+            self.root.after_cancel(self._theme_binding_job)
+            self._theme_binding_job = None
+            self._prepare_theme_bindings(dict(COLORS))
         started = time.perf_counter()
         self.settings.theme = theme
         # Keep the visual switch independent of disk latency. The debounced
@@ -5929,11 +5780,13 @@ class YaohengApp:
         return {"+": "+", "-": "−", "*": "×", "/": "÷", "%": "%", "^": "xʸ", ".": ".", ",": ",", "(": "(", ")": ")", "=": "="}.get(char)
 
     def on_key(self, event: tk.Event) -> str | None:
+        if getattr(self, "_navigation_job", None) is not None:
+            return None
         if self.current_page != "calculator":
             return None
         if isinstance(self.root.focus_get(), (tk.Entry, tk.Text, tk.Spinbox, ttk.Combobox)):
             return None
-        page = self.pages["calculator"]
+        page = self.ensure_page("calculator")
         if not isinstance(page, CalculatorPage):
             return None
         key = self._calculator_key(event)

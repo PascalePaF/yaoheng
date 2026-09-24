@@ -1415,13 +1415,11 @@ class ExchangePage(tk.Frame):
             cache_label = "（缓存）" if from_cache else ""
             self._set_quote_stamp(f"报价时间：{self.timestamp_formatter(fetched_at)}{cache_label}")
         self.state.invalidate()
-        self._clear_result_amounts()
         self.payment_generation += 1
         self._refresh_payment_options()
         self._refresh_currency_selectors()
-        self._refresh_target_cards()
         if self.visible:
-            self.recalculate_now()
+            self._queue_immediate_recalculate()
 
     def begin_refresh(self) -> None:
         self._set_status(
@@ -1438,7 +1436,10 @@ class ExchangePage(tk.Frame):
             return
         self.visible = True
         self._refresh_payment_options()
-        self.recalculate_now()
+        # Raise the already-rendered page first.  Repricing seven cards in the
+        # same navigation callback makes the tab feel stuck and flashes all
+        # result fields; a short scheduled pass retains the previous values.
+        self._queue_immediate_recalculate()
 
     def on_hide(self) -> None:
         if self.closed:
@@ -1528,6 +1529,17 @@ class ExchangePage(tk.Frame):
                 pass
         try:
             self.recalculate_job = self.after(self.DEBOUNCE_MS, self.recalculate_now)
+        except tk.TclError:
+            self.recalculate_job = None
+
+    def _queue_immediate_recalculate(self) -> None:
+        if self.recalculate_job is not None:
+            try:
+                self.after_cancel(self.recalculate_job)
+            except tk.TclError:
+                pass
+        try:
+            self.recalculate_job = self.after(32, self.recalculate_now)
         except tk.TclError:
             self.recalculate_job = None
 

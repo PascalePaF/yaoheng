@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "3.21.3"
+  #define AppVersion "4.0.0"
 #endif
 
 #define AppName "曜衡"
@@ -43,7 +43,7 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=yes
-VersionInfoVersion={#AppVersion}.0.0
+VersionInfoVersion={#AppVersion}.0
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} Windows 安装程序
 VersionInfoProductName={#AppName}

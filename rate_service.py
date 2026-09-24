@@ -557,6 +557,19 @@ class RateService:
             return False
         return True
 
+    def _save_committed_snapshot(self, snapshot: RateSnapshot) -> bool:
+        """Write a committed batch without holding the conversion state lock.
+
+        The cache lock serializes writers.  An older refresh that reaches disk
+        after a newer commit is skipped; if the newer commit happens during
+        this write, its own writer runs afterwards and wins.
+        """
+
+        with self._cache_lock:
+            if self.snapshot is not snapshot:
+                return True
+            return self.save_cache(snapshot)
+
     @staticmethod
     def _rate_strings_from_snapshot(
         snapshot: RateSnapshot, *, require_anchor: bool = True
@@ -1100,10 +1113,10 @@ class RateService:
                 rates, names, kinds, changes, fetched_at, fiat_updated, errors[:20], coin_ids
             )
             self.snapshot = snapshot
-            if not self.save_cache(snapshot):
-                warning = "本地缓存：写入失败，本次更新仅在当前会话有效"
-                snapshot.errors = [*(snapshot.errors or [])[:19], warning]
-            return snapshot
+        if not self._save_committed_snapshot(snapshot):
+            warning = "本地缓存：写入失败，本次更新仅在当前会话有效"
+            snapshot.errors = [*(snapshot.errors or [])[:19], warning]
+        return snapshot
 
     @staticmethod
     def _replace_snapshot_kind(
